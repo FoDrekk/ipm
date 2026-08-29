@@ -1,0 +1,136 @@
+@import "tailwindcss";
+
+@keyframes card-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.97) translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.animate-card-enter {
+  animation: card-enter 0.35s ease-out;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.3s ease-out;
+}
+
+@keyframes fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+/* forwards holds the end state (opacity: 0) — the overlay stays mounted
+   for the full 200ms (matching OVERLAY_EXIT_MS) so it can actually be
+   seen fading; without forwards it would revert to opaque the instant
+   the animation completes, flashing back just before removal. */
+.animate-fade-out {
+  animation: fade-out 0.2s ease-in forwards;
+}
+
+@keyframes pulse-alert {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.55;
+    transform: scale(1.15);
+  }
+}
+
+.animate-pulse-alert {
+  animation: pulse-alert 1.6s ease-in-out infinite;
+}
+
+/* Wider swing, faster cycle than pulse-alert — used only for OFFLINE's
+   small dashboard indicator, to read as more urgent than DEGRADED's
+   pulse. Not used on the fullscreen overlay, which stays on the gentler
+   pulse-alert — that context is already visually intense on its own. */
+@keyframes pulse-strong {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.4;
+    transform: scale(1.22);
+  }
+}
+
+.animate-pulse-strong {
+  animation: pulse-strong 1.2s ease-in-out infinite;
+}
+
+/* DEGRADED/VERIFYING's own animation character, distinct from OFFLINE's
+   pulse (scale + opacity) — a gentle rotation/shift reads as "wobbly,
+   uncertain" rather than "urgent," which is the actual distinction
+   between an unstable connection and a lost one. */
+@keyframes subtle-sway {
+  0%,
+  100% {
+    transform: translateX(0) rotate(0deg);
+  }
+  25% {
+    transform: translateX(-1px) rotate(-3deg);
+  }
+  75% {
+    transform: translateX(1px) rotate(3deg);
+  }
+}
+
+.animate-subtle-sway {
+  animation: subtle-sway 2s ease-in-out infinite;
+}
+
+/* Dedicated to the offline overlay specifically — kept separate from
+   fade-in/fade-out (used by several other components) so widening this
+   one to include a scale doesn't change anything else's animation. */
+@keyframes overlay-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.animate-overlay-enter {
+  animation: overlay-enter 0.3s ease-out;
+}
+
+@keyframes overlay-exit {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+}
+
+.animate-overlay-exit {
+  animation: overlay-exit 0.2s ease-in forwards;
+}
