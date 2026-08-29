@@ -1,11 +1,12 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import type { AppSettings, HistoryEvent, RetryStrategy } from '../ipc/ipc-client'
+import type { AlarmMode, AppSettings, HistoryEvent, RetryStrategy } from '../ipc/ipc-client'
 import { getHistory } from '../ipc/ipc-client'
 import { ALARM_SOUND_OPTIONS, type AlarmSound } from '../utils/alarmSounds'
 import { alarmEngine } from '../audio/alarmEngine'
 import { useConnectivityStore } from '../state/connectivity.store'
 import { useExitTransition } from '../hooks/useExitTransition'
 import { useAutostart } from '../hooks/useAutostart'
+import { useDiagnostics } from '../hooks/useDiagnostics'
 import ToggleSwitch from '../components/ToggleSwitch'
 import SegmentedControl from '../components/SegmentedControl'
 import VolumeSlider from '../components/VolumeSlider'
@@ -35,6 +36,11 @@ const RETRY_OPTIONS: { value: RetryStrategy; label: string }[] = [
   { value: 'aggressive', label: 'Aggressive' },
 ]
 
+const ALARM_MODE_OPTIONS: { value: AlarmMode; label: string }[] = [
+  { value: 'continuous', label: 'Continuous' },
+  { value: 'once', label: 'Once' },
+]
+
 const TEST_ALARM_DURATION_MS = 2_000
 const SAVED_EXIT_MS = 200
 
@@ -58,6 +64,35 @@ function FieldLabel({ children, description }: { children: string; description?:
   )
 }
 
+/** Reports its own outcome briefly after running, so a test that quietly
+ *  did nothing is distinguishable from one that worked. */
+function DiagnosticButton({
+  label,
+  result,
+  onClick,
+}: {
+  label: string
+  result: boolean | undefined
+  onClick: () => void
+}) {
+  const tone =
+    result === undefined
+      ? 'bg-slate-800 text-slate-200 hover:bg-slate-700'
+      : result
+        ? 'bg-emerald-500/20 text-emerald-300'
+        : 'bg-red-500/20 text-red-300'
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-lg px-3 py-2 text-sm font-medium transition-colors duration-150 active:scale-95 ${tone}`}
+    >
+      {result === undefined ? label : result ? `${label} — sent` : `${label} — unavailable`}
+    </button>
+  )
+}
+
 export default function SettingsPanel({ settings, onUpdate, onBack, justSaved }: SettingsPanelProps) {
   const [history, setHistory] = useState<HistoryEvent[]>([])
   const { enabled: autostart, setEnabled: setAutostart } = useAutostart()
@@ -68,6 +103,7 @@ export default function SettingsPanel({ settings, onUpdate, onBack, justSaved }:
   const isAlarmSounding = useConnectivityStore(
     (state) => state.isMonitoring && state.status === 'OFFLINE'
   )
+  const diagnostics = useDiagnostics()
 
   // Keeps the "Saved" text mounted for SAVED_EXIT_MS after justSaved goes
   // false so it can fade out instead of vanishing.
@@ -137,6 +173,16 @@ export default function SettingsPanel({ settings, onUpdate, onBack, justSaved }:
                 onChange={(sound: AlarmSound) => onUpdate({ alarm: { ...settings.alarm, sound } })}
               />
             </div>
+            <div>
+              <FieldLabel description="Continuous keeps sounding until the connection is back; Once is a single alert when it drops">
+                Alarm mode
+              </FieldLabel>
+              <SegmentedControl
+                options={ALARM_MODE_OPTIONS}
+                value={settings.alarm.mode}
+                onChange={(mode: AlarmMode) => onUpdate({ alarm: { ...settings.alarm, mode } })}
+              />
+            </div>
             <button
               type="button"
               onClick={handleTestAlarm}
@@ -204,6 +250,66 @@ export default function SettingsPanel({ settings, onUpdate, onBack, justSaved }:
                   : 'Start Internet Monitor Pro automatically when you sign in to Windows'
               }
             />
+            <ToggleSwitch
+              checked={settings.startup.startMonitoring}
+              onChange={(startMonitoring) =>
+                onUpdate({ startup: { ...settings.startup, startMonitoring } })
+              }
+              label="Start monitoring automatically"
+              description="Begin checking as soon as the app launches"
+            />
+            <ToggleSwitch
+              checked={settings.startup.startMinimized}
+              onChange={(startMinimized) =>
+                onUpdate({ startup: { ...settings.startup, startMinimized } })
+              }
+              label="Start minimized to tray"
+              description="Launch into the tray without opening the window — monitoring, alerts and the alarm still run"
+            />
+          </Section>
+
+          <Section title="Diagnostics">
+            <p className="-mt-1 text-[11px] text-slate-600">
+              Each test drives the real service, so a passing test means the feature itself works.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <DiagnosticButton
+                label="Test Notification"
+                result={diagnostics.results.notification}
+                onClick={() => diagnostics.runTest('notification')}
+              />
+              <DiagnosticButton
+                label="Test Tray"
+                result={diagnostics.results.tray}
+                onClick={() => diagnostics.runTest('tray')}
+              />
+            </div>
+
+            <div className="mt-1 flex flex-col gap-2 rounded-lg border border-slate-800/70 bg-slate-950/40 p-3">
+              <p className="text-xs text-slate-400">Offline simulation</p>
+              <p className="text-[11px] text-slate-600">
+                Forces connection checks to fail so the real offline path runs end to end — overlay,
+                alarm, notification, window restore and history. Stops on its own if the app is
+                restarted.
+              </p>
+              {diagnostics.isSimulating ? (
+                <button
+                  type="button"
+                  onClick={() => diagnostics.toggleSimulation(false)}
+                  className="self-start rounded-lg bg-amber-500/20 px-3 py-2 text-sm font-medium text-amber-300 transition-colors duration-150 hover:bg-amber-500/30 active:scale-95"
+                >
+                  Stop Simulation
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => diagnostics.toggleSimulation(true)}
+                  className="self-start rounded-lg bg-slate-800 px-3 py-2 text-sm font-medium text-slate-200 transition-colors duration-150 hover:bg-slate-700 active:scale-95"
+                >
+                  Simulate Offline
+                </button>
+              )}
+            </div>
           </Section>
 
           <Section title="Recent Activity">

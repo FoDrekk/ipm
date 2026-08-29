@@ -29,6 +29,21 @@ describe('mergeSettings', () => {
     }
   })
 
+  test('carries the startup category like any other', () => {
+    const merged = mergeSettings(DEFAULT_SETTINGS, { startup: { startMinimized: true } })
+    assert.equal(merged.startup.startMinimized, true)
+    // A category added after the first release must not drop the
+    // sibling field it was merged onto.
+    assert.equal(merged.startup.startMonitoring, DEFAULT_SETTINGS.startup.startMonitoring)
+  })
+
+  test('alarm mode merges without disturbing the rest of the alarm', () => {
+    const merged = mergeSettings(DEFAULT_SETTINGS, { alarm: { mode: 'once' } })
+    assert.equal(merged.alarm.mode, 'once')
+    assert.equal(merged.alarm.volume, DEFAULT_SETTINGS.alarm.volume)
+    assert.equal(merged.alarm.sound, DEFAULT_SETTINGS.alarm.sound)
+  })
+
   test('the last write wins when patches are applied in order', () => {
     let settings = DEFAULT_SETTINGS
     for (const volume of [10, 40, 90, 55]) {

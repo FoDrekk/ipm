@@ -1,13 +1,25 @@
 import type {
+  AlarmMode,
   AppApi,
   AppSettings,
   ConnectivityState,
+  ConnectivityStats,
   ConnectivityStatus,
   HistoryEvent,
+  HistoryStatus,
   RetryStrategy,
 } from '../../electron/shared/types'
 
-export type { AppSettings, ConnectivityState, ConnectivityStatus, HistoryEvent, RetryStrategy }
+export type {
+  AlarmMode,
+  AppSettings,
+  ConnectivityState,
+  ConnectivityStats,
+  ConnectivityStatus,
+  HistoryEvent,
+  HistoryStatus,
+  RetryStrategy,
+}
 
 declare global {
   interface Window {
@@ -68,4 +80,20 @@ export function setAutostart(enabled: boolean): Promise<boolean> {
 
 export function getHistory(): Promise<HistoryEvent[]> {
   return bridge().history.get()
+}
+
+export function getStats(): Promise<ConnectivityStats> {
+  return bridge().stats.get()
+}
+
+export function setSimulatedOffline(enabled: boolean): Promise<ConnectivityState> {
+  return bridge().diagnostics.setSimulatedOffline(enabled)
+}
+
+export function testNotification(): Promise<boolean> {
+  return bridge().diagnostics.testNotification()
+}
+
+export function testTray(): Promise<boolean> {
+  return bridge().diagnostics.testTray()
 }

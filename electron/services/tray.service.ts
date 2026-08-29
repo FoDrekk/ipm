@@ -25,6 +25,9 @@ const ICON_FILES: Record<TrayState, string> = {
   PAUSED: 'tray-paused.png',
 }
 
+/** How long each icon is held during the diagnostics flash. */
+const TRAY_TEST_STEP_MS = 450
+
 const STATUS_LABELS: Record<TrayState, string> = {
   ONLINE: '🟢 Online',
   DEGRADED: '🟡 Degraded',
@@ -59,6 +62,7 @@ export class TrayService {
   private readonly options: TrayServiceOptions
   private state: TrayState = 'PAUSED'
   private readonly iconCache = new Map<TrayState, NativeImage>()
+  private testTimer: ReturnType<typeof setInterval> | null = null
 
   constructor(options: TrayServiceOptions) {
     this.options = options
@@ -86,13 +90,59 @@ export class TrayService {
     const next: TrayState = state.isMonitoring ? state.status : 'PAUSED'
     if (next === this.state) return
     this.state = next
+    // A diagnostics flash must not outlive a real status change; the
+    // icon below is the truth, and the test has just been overtaken.
+    this.clearTest()
     this.applyIcon()
     this.refreshMenu()
   }
 
+  /**
+   * Diagnostics: cycles the icon through each state and back, so the user
+   * can see at a glance that the tray exists, is reachable, and can
+   * repaint. Restoring from `this.state` rather than from a saved copy
+   * means a status change arriving mid-test wins, instead of the test
+   * stamping a stale icon over it when it finishes.
+   *
+   * Returns false when there is no tray to test — the honest answer, and
+   * itself a useful diagnostic result.
+   */
+  runTest(): boolean {
+    if (!this.tray) return false
+    if (this.testTimer) return true // a test is already running
+
+    const sequence: TrayState[] = ['ONLINE', 'DEGRADED', 'OFFLINE']
+    let step = 0
+
+    const advance = (): void => {
+      if (!this.tray) {
+        this.clearTest()
+        return
+      }
+      if (step < sequence.length) {
+        this.tray.setImage(this.iconFor(sequence[step]))
+        step += 1
+        return
+      }
+      this.clearTest()
+      this.applyIcon()
+    }
+
+    advance()
+    this.testTimer = setInterval(advance, TRAY_TEST_STEP_MS)
+    return true
+  }
+
   destroy(): void {
+    this.clearTest()
     this.tray?.destroy()
     this.tray = null
+  }
+
+  private clearTest(): void {
+    if (this.testTimer === null) return
+    clearInterval(this.testTimer)
+    this.testTimer = null
   }
 
   private applyIcon(): void {

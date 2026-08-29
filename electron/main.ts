@@ -8,8 +8,10 @@ import {
   RETRY_STRATEGY_PRESETS,
   type AppSettings,
   type ConnectivityState,
+  type ConnectivityStats,
   type HistoryEvent,
 } from './shared/types'
+import { computeStats, startOfLocalDay, timelineStatusFor } from './shared/stats'
 
 const isDev = process.env.NODE_ENV === 'development'
 const DEV_SERVER_URL = 'http://localhost:5173'
@@ -62,6 +64,10 @@ function bootstrap(): void {
   // window's close button, which hides to the tray instead.
   let isQuitting = false
 
+  // Consumed by the first window's ready-to-show. Set from the user's
+  // startup preference below.
+  let startHidden = false
+
   // Loaded synchronously before anything else is constructed, so the
   // services start up already configured the way the user left them
   // rather than with defaults that get corrected a moment later.
@@ -83,16 +89,23 @@ function bootstrap(): void {
       sendToRenderer(state)
       trayService.update(state)
 
+      // The timeline is recorded on every report, not only on a status
+      // change, because monitoring being paused is a timeline event too
+      // and does not change the status. addHistoryEvent already ignores
+      // anything that repeats the newest entry, so this writes only when
+      // something genuinely changed. VERIFYING is not a verdict and
+      // never enters the timeline.
+      const timelineStatus = timelineStatusFor(state.status, state.isMonitoring)
+      if (timelineStatus !== null) storageService.addHistoryEvent(timelineStatus)
+
       // The rest are one-shot reactions to a real transition. Repeated
       // reports of an unchanged status (one per probe) must not produce
-      // repeated notifications or history entries.
+      // repeated notifications or repeated windows appearing.
       if (!statusChanged) return
-      notificationService.notify(state.status)
-      // History records confirmed verdicts only — VERIFYING is transient
-      // and unconfirmed, the same reason it drives no alarm or alert.
-      if (state.status !== 'VERIFYING') {
-        storageService.addHistoryEvent(state.status)
-      }
+      notificationService.notify(state)
+      // Exactly once per outage, because `statusChanged` is true only on
+      // the transition into OFFLINE — not on the reports that follow it.
+      if (state.status === 'OFFLINE' && state.isMonitoring) revealForOutage()
     },
   })
 
@@ -125,10 +138,21 @@ function bootstrap(): void {
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
+        // This window spends most of its life hidden in the tray, and it
+        // is where the alarm actually plays. Chromium throttles timers in
+        // hidden windows to roughly one tick a second, which would stall
+        // the alarm's volume ramp and fades exactly when they matter.
+        backgroundThrottling: false,
       },
     })
 
-    window.once('ready-to-show', () => window.show())
+    window.once('ready-to-show', () => {
+      if (!startHidden) window.show()
+      // One-shot: only the launch honours "start minimized". Every later
+      // reason to build a window (a renderer crash, the tray's Open
+      // Dashboard) is a request to see it.
+      startHidden = false
+    })
 
     // This window only ever shows the app's own UI. Anything trying to
     // navigate it elsewhere, or open a new window, is refused; external
@@ -189,6 +213,36 @@ function bootstrap(): void {
     if (mainWindow.isMinimized()) mainWindow.restore()
     mainWindow.show()
     mainWindow.focus()
+  }
+
+  /**
+   * Brings the dashboard up for a confirmed outage.
+   *
+   * Called only from the OFFLINE transition, so it runs once per outage
+   * and cannot loop: the reports that follow carry `statusChanged: false`.
+   * A window that is already visible is left alone rather than being
+   * raised again, which would steal focus from whatever the user is
+   * doing for no new information.
+   */
+  function revealForOutage(): void {
+    if (isQuitting) return
+
+    const window = mainWindow
+    const alreadyVisible =
+      window !== null && !window.isDestroyed() && window.isVisible() && !window.isMinimized()
+    if (alreadyVisible) return
+
+    showWindow()
+
+    // Windows will not let a background process take the foreground on
+    // request alone; a window that briefly claims always-on-top does get
+    // raised. The flag is dropped again immediately so the dashboard
+    // does not sit on top of everything afterwards.
+    const shown = mainWindow
+    if (!shown || shown.isDestroyed()) return
+    shown.setAlwaysOnTop(true)
+    shown.setAlwaysOnTop(false)
+    shown.focus()
   }
 
   function quit(): void {
@@ -260,6 +314,29 @@ function bootstrap(): void {
 
   ipcMain.handle('history:get', (): HistoryEvent[] => storageService.getHistory())
 
+  ipcMain.handle('stats:get', (): ConnectivityStats => {
+    const now = Date.now()
+    const state = monitorService.getState()
+    return computeStats(storageService.getHistory(), {
+      now,
+      windowStart: startOfLocalDay(now),
+      // The timeline's open final segment belongs to what is happening
+      // now, which is fresher than the last recorded transition.
+      currentStatus: timelineStatusFor(state.status, state.isMonitoring),
+    })
+  })
+
+  // ---- diagnostics -----------------------------------------------------
+
+  ipcMain.handle('diagnostics:set-simulated-offline', (_event, enabled: unknown): ConnectivityState => {
+    if (typeof enabled === 'boolean') monitorService.setSimulatedOffline(enabled)
+    return monitorService.getState()
+  })
+
+  ipcMain.handle('diagnostics:test-notification', (): boolean => notificationService.showTest())
+
+  ipcMain.handle('diagnostics:test-tray', (): boolean => trayService.runTest())
+
   function readAutostart(): boolean {
     try {
       return app.getLoginItemSettings().openAtLogin
@@ -284,6 +361,11 @@ function bootstrap(): void {
   app.on('will-quit', () => {
     monitorService.dispose()
     trayService.destroy()
+    // Closes the timeline so the hours the app is not running are not
+    // credited to whatever status it happened to end on. StorageService
+    // repairs this on load if we never got here (a crash), but recording
+    // it properly keeps the far more common clean exit exact.
+    storageService.addHistoryEvent('PAUSED')
   })
 
   // The app deliberately outlives its window: closing it hides to the
@@ -296,12 +378,17 @@ function bootstrap(): void {
   })
 
   void app.whenReady().then(() => {
+    // The window is always created, even when starting minimized: it
+    // hosts the alarm and the offline alert, which have to work whether
+    // or not anyone is looking at it. "Minimized" means not shown, not
+    // not loaded.
+    startHidden = initialSettings.startup.startMinimized
     showWindow()
     trayService.init()
-    // Monitoring starts immediately rather than waiting for the user to
-    // open the dashboard and flip the toggle — the app has a launch-on-
-    // startup option, which would otherwise open into the tray and
-    // monitor nothing. The toggle still works normally afterwards.
-    monitorService.start()
+
+    // Off by choice means paused, not broken: the dashboard toggle and
+    // the tray menu both still start it, and the tray shows the paused
+    // state so it never looks like monitoring silently failed.
+    if (initialSettings.startup.startMonitoring) monitorService.start()
   })
 }

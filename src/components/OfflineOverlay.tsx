@@ -13,6 +13,10 @@ interface OfflineOverlayProps {
   onUpdateSettings: (partial: Partial<AppSettings>) => void
   isSnoozed: boolean
   onSnooze: () => void
+  /** True when Diagnostics is forcing the outage. The alert is otherwise
+   *  identical on purpose — that is what makes it a real test — so this
+   *  line is the only thing telling the two apart. */
+  isSimulated: boolean
 }
 
 /**
@@ -32,6 +36,7 @@ export default function OfflineOverlay({
   onUpdateSettings,
   isSnoozed,
   onSnooze,
+  isSimulated,
 }: OfflineOverlayProps) {
   const [isDismissed, setIsDismissed] = useState(false)
   const duration = useOfflineDuration(offlineSince)
@@ -61,6 +66,12 @@ export default function OfflineOverlay({
       <StatusIcon status="OFFLINE" sizeClassName="h-16 w-16" gentlePulse />
 
       <p className="text-3xl font-extrabold tracking-wide text-red-400">NO INTERNET CONNECTION</p>
+
+      {isSimulated && (
+        <p className="rounded-full bg-amber-500/20 px-3 py-1 text-xs font-medium text-amber-300">
+          Simulated outage — your connection has not actually dropped
+        </p>
+      )}
 
       {duration && <p className="text-sm text-slate-400">Offline for {duration}</p>}
 
