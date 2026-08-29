@@ -5,12 +5,11 @@ const TICK_MS = 1000
 /**
  * Live duration text ("5 seconds", "2 minutes") for a nullable start
  * timestamp, ticking once a second while `since` is set. Returns null
- * when there's nothing to time.
+ * when there is nothing to time, so callers can omit the line entirely.
  *
- * A separate, self-contained hook rather than reusing useRelativeTime:
- * the two produce different phrasing ("ago" vs. a plain duration, no
- * "just now" bucket) and are independent enough that sharing would mean
- * routing one through string manipulation of the other's output.
+ * Separate from useRelativeTime rather than reusing it: the two produce
+ * different phrasing (a plain duration versus "ago", and no "just now"
+ * bucket), so sharing would mean string-manipulating one into the other.
  */
 export function useOfflineDuration(since: string | null): string | null {
   const [, forceTick] = useReducer((tick: number) => tick + 1, 0)
@@ -23,7 +22,10 @@ export function useOfflineDuration(since: string | null): string | null {
 
   if (!since) return null
 
-  const totalSeconds = Math.max(0, Math.round((Date.now() - new Date(since).getTime()) / 1000))
+  const start = new Date(since).getTime()
+  if (Number.isNaN(start)) return null
+
+  const totalSeconds = Math.max(0, Math.round((Date.now() - start) / 1000))
 
   if (totalSeconds < 60) {
     return `${totalSeconds} second${totalSeconds === 1 ? '' : 's'}`

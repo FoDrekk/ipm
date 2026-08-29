@@ -1,79 +1,92 @@
-import { Tray, Menu, nativeImage, app, type BrowserWindow } from 'electron'
+import { Tray, Menu, nativeImage, app, type NativeImage } from 'electron'
 import path from 'node:path'
-import type { ConnectivityStatus } from './monitor.service'
+import type { ConnectivityState, ConnectivityStatus } from '../shared/types'
 
 interface TrayServiceOptions {
-  getMainWindow: () => BrowserWindow | null
-  isMonitoring: () => boolean
+  /** Shows the dashboard, creating the window again if it was destroyed. */
+  onShowWindow: () => void
   onStartMonitoring: () => void
   onStopMonitoring: () => void
+  onQuit: () => void
 }
 
-// VERIFYING reuses DEGRADED's icon — same amber "uncertain" treatment the
-// rest of the UI already uses for both, no need for a fourth asset.
-const ICON_FILES: Record<ConnectivityStatus, string> = {
+/** The tray's own view of the app: the connectivity status, or the fact
+ *  that nothing is being monitored at all — which is not a connectivity
+ *  status and must not be shown as one. */
+type TrayState = ConnectivityStatus | 'PAUSED'
+
+// VERIFYING reuses DEGRADED's icon — the same amber "uncertain" treatment
+// the rest of the UI already uses for both, no need for another asset.
+const ICON_FILES: Record<TrayState, string> = {
   ONLINE: 'tray-online.png',
   DEGRADED: 'tray-degraded.png',
   VERIFYING: 'tray-degraded.png',
   OFFLINE: 'tray-offline.png',
+  PAUSED: 'tray-paused.png',
 }
 
-const STATUS_LABELS: Record<ConnectivityStatus, string> = {
+const STATUS_LABELS: Record<TrayState, string> = {
   ONLINE: '🟢 Online',
   DEGRADED: '🟡 Degraded',
   VERIFYING: '🟡 Checking…',
   OFFLINE: '🔴 Offline',
+  PAUSED: '⚪ Monitoring paused',
 }
 
-// In dev mode, dist-electron/services/ sits two levels below the project
-// root (same as the source tree), so the existing relative traversal
-// finds assets/tray directly on disk. A packaged app is different: this
-// file compiles into dist-electron/, which is bundled INSIDE app.asar
-// (see package.json's "files"), so the same relative traversal would
-// resolve to a path inside the asar archive. The tray icons are instead
-// placed outside the asar via "extraResources", at <install-dir>/resources
-// /assets/tray — process.resourcesPath always points there, packaged or
-// not, so that's what's used once app.isPackaged is true.
+// In dev, dist-electron/services/ sits two levels below the project root
+// (same as the source tree), so this relative traversal finds
+// assets/tray directly on disk. Packaged is different: this file is
+// bundled inside app.asar, so the same traversal would resolve to a path
+// inside the archive. The icons are placed outside it via
+// electron-builder's "extraResources", at <install>/resources/assets/tray
+// — which is exactly what process.resourcesPath points at.
 const TRAY_ICONS_DIR = app.isPackaged
   ? path.join(process.resourcesPath, 'assets/tray')
   : path.join(__dirname, '../../assets/tray')
 
 /**
  * Owns the tray icon and its context menu. Has no polling or state of its
- * own — `updateStatus` is called from the same onStatusChange callback
- * that drives the IPC push and notifications, so the tray can't drift out
- * of sync with what the window shows.
+ * own — `update` is called from the same monitor callback that drives the
+ * IPC push and notifications, so the tray cannot drift out of sync with
+ * what the window shows.
+ *
+ * Both the icon and the menu are rebuilt only when the state they depend
+ * on actually changed, so the steady-state cost of a probe landing every
+ * few seconds is a comparison, not a menu rebuild.
  */
 export class TrayService {
   private tray: Tray | null = null
   private readonly options: TrayServiceOptions
-  private currentStatus: ConnectivityStatus = 'OFFLINE'
+  private state: TrayState = 'PAUSED'
+  private readonly iconCache = new Map<TrayState, NativeImage>()
 
   constructor(options: TrayServiceOptions) {
     this.options = options
   }
 
+  /** Idempotent — a second call is a no-op rather than a second tray. */
   init(): void {
     if (this.tray) return
-    this.tray = new Tray(this.iconFor(this.currentStatus))
-    this.tray.on('click', () => this.showWindow())
-    this.applyIcon(this.currentStatus) // sets the tooltip too, for first paint
-    this.refreshMenu()
+    try {
+      this.tray = new Tray(this.iconFor(this.state))
+      this.tray.on('click', () => this.options.onShowWindow())
+      this.tray.on('double-click', () => this.options.onShowWindow())
+      this.applyIcon()
+      this.refreshMenu()
+    } catch (error) {
+      // A tray that won't initialise (missing icon file, no system tray)
+      // is a degraded experience, not a reason to fail startup — the
+      // window and monitoring work regardless.
+      console.error('[TrayService] Failed to create tray icon:', error)
+      this.tray = null
+    }
   }
 
-  updateStatus(status: ConnectivityStatus): void {
-    // Only touch the icon/tooltip on a genuine change. updateStatus is
-    // also called for isMonitoring-only announcements (start/stop),
-    // where status is unchanged — re-setting the same image every time
-    // is exactly the "update when nothing changed" this was asked to
-    // avoid, even though it wouldn't have been visibly wrong.
-    if (status !== this.currentStatus) {
-      this.currentStatus = status
-      this.applyIcon(status)
-    }
-
-    // The menu always rebuilds: its Start/Stop enabled-state depends on
-    // isMonitoring, which can change independently of status.
+  update(state: ConnectivityState): void {
+    const next: TrayState = state.isMonitoring ? state.status : 'PAUSED'
+    if (next === this.state) return
+    this.state = next
+    this.applyIcon()
     this.refreshMenu()
   }
 
@@ -82,21 +95,21 @@ export class TrayService {
     this.tray = null
   }
 
-  private applyIcon(status: ConnectivityStatus): void {
+  private applyIcon(): void {
     if (!this.tray) return
-    this.tray.setImage(this.iconFor(status))
-    this.tray.setToolTip(`Internet Monitor Pro — ${STATUS_LABELS[status]}`)
+    this.tray.setImage(this.iconFor(this.state))
+    this.tray.setToolTip(`Internet Monitor Pro — ${STATUS_LABELS[this.state]}`)
   }
 
   private refreshMenu(): void {
     if (!this.tray) return
 
-    const isMonitoring = this.options.isMonitoring()
+    const isMonitoring = this.state !== 'PAUSED'
     this.tray.setContextMenu(
       Menu.buildFromTemplate([
-        { label: STATUS_LABELS[this.currentStatus], enabled: false },
+        { label: STATUS_LABELS[this.state], enabled: false },
         { type: 'separator' },
-        { label: 'Open Dashboard', click: () => this.showWindow() },
+        { label: 'Open Dashboard', click: () => this.options.onShowWindow() },
         { type: 'separator' },
         {
           label: isMonitoring ? 'Stop Monitoring' : 'Start Monitoring',
@@ -104,20 +117,20 @@ export class TrayService {
             isMonitoring ? this.options.onStopMonitoring() : this.options.onStartMonitoring(),
         },
         { type: 'separator' },
-        { label: 'Exit App', click: () => app.quit() },
+        { label: 'Exit App', click: () => this.options.onQuit() },
       ])
     )
   }
 
-  private iconFor(status: ConnectivityStatus): Electron.NativeImage {
-    return nativeImage.createFromPath(path.join(TRAY_ICONS_DIR, ICON_FILES[status]))
-  }
+  private iconFor(state: TrayState): NativeImage {
+    const cached = this.iconCache.get(state)
+    if (cached) return cached
 
-  private showWindow(): void {
-    const win = this.options.getMainWindow()
-    if (!win) return
-    if (win.isMinimized()) win.restore()
-    win.show()
-    win.focus()
+    const image = nativeImage.createFromPath(path.join(TRAY_ICONS_DIR, ICON_FILES[state]))
+    if (image.isEmpty()) {
+      console.warn(`[TrayService] Tray icon not found or unreadable: ${ICON_FILES[state]}`)
+    }
+    this.iconCache.set(state, image)
+    return image
   }
 }

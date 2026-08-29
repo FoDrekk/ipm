@@ -1,40 +1,22 @@
 import { app } from 'electron'
 import path from 'node:path'
 import fs from 'node:fs'
-import type { ConnectivityState, ConfirmedStatus } from './monitor.service'
+import {
+  DEFAULT_SETTINGS,
+  mergeSettings,
+  type AlarmSound,
+  type AppSettings,
+  type ConfirmedStatus,
+  type HistoryEvent,
+  type RetryStrategy,
+} from '../shared/types'
 
-// Mirrors src/utils/alarmSounds.ts's AlarmSound type. Duplicated rather
-// than imported: tsconfig.electron.json's rootDir is scoped to electron/,
-// so importing a renderer-side file here risks a rootDir violation for
-// what's just a 3-value string union.
-export type AlarmSound = 'classic-beep' | 'gentle-chime' | 'urgent-siren'
-
-export type RetryStrategy = 'normal' | 'aggressive'
-
-export interface AppSettings {
-  alarm: {
-    enabled: boolean
-    volume: number // 0-100
-    sound: AlarmSound
-  }
-  notifications: {
-    enabled: boolean
-    cooldownMs: number
-  }
-  monitoring: {
-    intervalMs: number
-    retryStrategy: RetryStrategy
-  }
-}
-
-export interface HistoryEvent {
-  status: ConfirmedStatus
-  at: string
-}
+export type { AlarmSound, AppSettings, HistoryEvent, RetryStrategy }
+export { DEFAULT_SETTINGS }
 
 /** Bumped whenever AppSettings' shape changes in a way that would need
  *  explicit migration logic (a field renamed or removed, not just added
- *  — added fields are already handled by the per-category default-merge
+ *  — added fields are already handled by the per-field default-merge
  *  below). Nothing to migrate yet since this is version 1, but the field
  *  is there now so a future version bump has something to check against
  *  instead of guessing from shape alone. */
@@ -43,22 +25,7 @@ const SCHEMA_VERSION = 1
 interface PersistedData {
   version: number
   settings: AppSettings
-  lastStatus: ConnectivityState | null
   history: HistoryEvent[]
-}
-
-export const DEFAULT_SETTINGS: AppSettings = {
-  alarm: { enabled: true, volume: 70, sound: 'classic-beep' },
-  notifications: { enabled: true, cooldownMs: 10_000 },
-  monitoring: { intervalMs: 10_000, retryStrategy: 'normal' },
-}
-
-export const RETRY_STRATEGY_PRESETS: Record<
-  RetryStrategy,
-  { offlineDebounceMs: number; transitionCooldownMs: number; requestTimeoutMs: number }
-> = {
-  normal: { offlineDebounceMs: 3_000, transitionCooldownMs: 5_000, requestTimeoutMs: 5_000 },
-  aggressive: { offlineDebounceMs: 1_000, transitionCooldownMs: 2_000, requestTimeoutMs: 3_000 },
 }
 
 const FILE_NAME = 'app-data.json'
@@ -70,6 +37,14 @@ function isAlarmSound(value: unknown): value is AlarmSound {
 
 function isRetryStrategy(value: unknown): value is RetryStrategy {
   return value === 'normal' || value === 'aggressive'
+}
+
+function isConfirmedStatus(value: unknown): value is ConfirmedStatus {
+  return value === 'ONLINE' || value === 'DEGRADED' || value === 'OFFLINE'
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 /** For numeric fields specifically: a value of the wrong type (or NaN/
@@ -84,74 +59,100 @@ function clampedNumberOrDefault(value: unknown, min: number, max: number, fallba
   return Math.min(max, Math.max(min, value))
 }
 
-/** Validates one settings category against its own defaults, field by
- *  field. Numeric fields (volume, cooldownMs, intervalMs) are clamped to
- *  their valid range rather than rejected — see clampedNumberOrDefault.
- *  Non-numeric fields (booleans, sound/retry-strategy enums) have no
- *  sensible "nearest valid value," so a wrong type or unrecognized enum
- *  still falls back to that field's default. Either way, a bad value
- *  never propagates past this function, and it never takes down the
- *  whole category for one bad field. */
+/**
+ * Validates settings field by field against their defaults. Numeric
+ * fields are clamped to their valid range; booleans and enums have no
+ * "nearest valid value" so a wrong type falls back to that field's
+ * default. A bad value never propagates past this function, and one bad
+ * field never takes down the rest of the category.
+ */
 function validateSettings(raw: unknown): AppSettings {
-  const r = (raw ?? {}) as Partial<AppSettings>
-  const alarm = (r.alarm ?? {}) as Partial<AppSettings['alarm']>
-  const notifications = (r.notifications ?? {}) as Partial<AppSettings['notifications']>
-  const monitoring = (r.monitoring ?? {}) as Partial<AppSettings['monitoring']>
+  const r = isRecord(raw) ? raw : {}
+  const alarm = isRecord(r.alarm) ? r.alarm : {}
+  const notifications = isRecord(r.notifications) ? r.notifications : {}
+  const monitoring = isRecord(r.monitoring) ? r.monitoring : {}
 
-  const alarmEnabled = typeof alarm.enabled === 'boolean' ? alarm.enabled : DEFAULT_SETTINGS.alarm.enabled
-  const alarmVolume = clampedNumberOrDefault(alarm.volume, 0, 100, DEFAULT_SETTINGS.alarm.volume)
-  const alarmSound = isAlarmSound(alarm.sound) ? alarm.sound : DEFAULT_SETTINGS.alarm.sound
-  const notificationsEnabled =
-    typeof notifications.enabled === 'boolean'
-      ? notifications.enabled
-      : DEFAULT_SETTINGS.notifications.enabled
-  const notificationsCooldownMs = clampedNumberOrDefault(
-    notifications.cooldownMs,
-    0,
-    3_600_000,
-    DEFAULT_SETTINGS.notifications.cooldownMs
-  )
-  const monitoringIntervalMs = clampedNumberOrDefault(
-    monitoring.intervalMs,
-    500,
-    3_600_000,
-    DEFAULT_SETTINGS.monitoring.intervalMs
-  )
-  const monitoringRetryStrategy = isRetryStrategy(monitoring.retryStrategy)
-    ? monitoring.retryStrategy
-    : DEFAULT_SETTINGS.monitoring.retryStrategy
+  const validated: AppSettings = {
+    alarm: {
+      enabled: typeof alarm.enabled === 'boolean' ? alarm.enabled : DEFAULT_SETTINGS.alarm.enabled,
+      volume: clampedNumberOrDefault(alarm.volume, 0, 100, DEFAULT_SETTINGS.alarm.volume),
+      sound: isAlarmSound(alarm.sound) ? alarm.sound : DEFAULT_SETTINGS.alarm.sound,
+    },
+    notifications: {
+      enabled:
+        typeof notifications.enabled === 'boolean'
+          ? notifications.enabled
+          : DEFAULT_SETTINGS.notifications.enabled,
+      cooldownMs: clampedNumberOrDefault(
+        notifications.cooldownMs,
+        0,
+        3_600_000,
+        DEFAULT_SETTINGS.notifications.cooldownMs
+      ),
+    },
+    monitoring: {
+      intervalMs: clampedNumberOrDefault(
+        monitoring.intervalMs,
+        1_000,
+        3_600_000,
+        DEFAULT_SETTINGS.monitoring.intervalMs
+      ),
+      retryStrategy: isRetryStrategy(monitoring.retryStrategy)
+        ? monitoring.retryStrategy
+        : DEFAULT_SETTINGS.monitoring.retryStrategy,
+    },
+  }
 
-  // Aggregate, not per-field: one warning if anything needed correcting,
-  // not up to seven lines for a file with several bad fields at once.
-  const anyCorrected =
-    alarmEnabled !== alarm.enabled ||
-    alarmVolume !== alarm.volume ||
-    alarmSound !== alarm.sound ||
-    notificationsEnabled !== notifications.enabled ||
-    notificationsCooldownMs !== notifications.cooldownMs ||
-    monitoringIntervalMs !== monitoring.intervalMs ||
-    monitoringRetryStrategy !== monitoring.retryStrategy
+  // Aggregate, not per-field: one warning if anything present in the
+  // input had to be corrected, not up to seven lines. A field that was
+  // simply absent (a file written by an older version) is filled in
+  // silently — that's a default, not a correction.
+  const corrected =
+    wasCorrected(alarm.enabled, validated.alarm.enabled) ||
+    wasCorrected(alarm.volume, validated.alarm.volume) ||
+    wasCorrected(alarm.sound, validated.alarm.sound) ||
+    wasCorrected(notifications.enabled, validated.notifications.enabled) ||
+    wasCorrected(notifications.cooldownMs, validated.notifications.cooldownMs) ||
+    wasCorrected(monitoring.intervalMs, validated.monitoring.intervalMs) ||
+    wasCorrected(monitoring.retryStrategy, validated.monitoring.retryStrategy)
 
-  if (anyCorrected) {
+  if (corrected) {
     console.warn(
       '[StorageService] One or more settings values were invalid or out of range — corrected to safe defaults/bounds.'
     )
   }
 
-  return {
-    alarm: { enabled: alarmEnabled, volume: alarmVolume, sound: alarmSound },
-    notifications: { enabled: notificationsEnabled, cooldownMs: notificationsCooldownMs },
-    monitoring: { intervalMs: monitoringIntervalMs, retryStrategy: monitoringRetryStrategy },
+  return validated
+}
+
+function wasCorrected(input: unknown, output: unknown): boolean {
+  return input !== undefined && input !== output
+}
+
+/** Drops anything that isn't a well-formed event, so a hand-edited or
+ *  half-written file can't reach the UI as an unknown status (which the
+ *  history list would have no colour or label for) or an unparseable
+ *  date. */
+function validateHistory(raw: unknown): HistoryEvent[] {
+  if (!Array.isArray(raw)) return []
+  const valid: HistoryEvent[] = []
+  for (const entry of raw) {
+    if (!isRecord(entry)) continue
+    if (!isConfirmedStatus(entry.status)) continue
+    if (typeof entry.at !== 'string' || Number.isNaN(new Date(entry.at).getTime())) continue
+    valid.push({ status: entry.status, at: entry.at })
+    if (valid.length >= MAX_HISTORY) break
   }
+  return valid
 }
 
 /**
- * Owns the single persisted JSON file — settings, last known status, and
- * recent event history all live in one in-memory object here, with one
- * save path. That matters: settings and history are written from
- * different call sites, and if each independently loaded-modified-saved
- * the file, one could clobber the other's recent change. Keeping a
- * single owned copy in memory makes that impossible by construction.
+ * Owns the single persisted JSON file — settings and recent event
+ * history live in one in-memory object here, with one save path. That
+ * matters: settings and history are written from different call sites,
+ * and if each independently loaded-modified-saved the file, one could
+ * clobber the other's recent change. Keeping a single owned copy in
+ * memory makes that impossible by construction.
  */
 export class StorageService {
   private data: PersistedData
@@ -164,24 +165,13 @@ export class StorageService {
     return this.data.settings
   }
 
+  /** Merges a (possibly malformed — it comes from the renderer) partial
+   *  onto the current settings, validates the result, persists it, and
+   *  returns exactly what was stored. */
   updateSettings(partial: Partial<AppSettings>): AppSettings {
-    const merged: AppSettings = {
-      alarm: { ...this.data.settings.alarm, ...partial.alarm },
-      notifications: { ...this.data.settings.notifications, ...partial.notifications },
-      monitoring: { ...this.data.settings.monitoring, ...partial.monitoring },
-    }
-    this.data.settings = validateSettings(merged)
+    this.data.settings = validateSettings(mergeSettings(this.data.settings, partial))
     this.save()
     return this.data.settings
-  }
-
-  getLastStatus(): ConnectivityState | null {
-    return this.data.lastStatus
-  }
-
-  setLastStatus(state: ConnectivityState): void {
-    this.data.lastStatus = state
-    this.save()
   }
 
   getHistory(): HistoryEvent[] {
@@ -207,29 +197,27 @@ export class StorageService {
   private load(): PersistedData {
     try {
       const raw = fs.readFileSync(this.filePath(), 'utf-8')
-      const parsed = JSON.parse(raw) as Partial<PersistedData>
+      const parsed: unknown = JSON.parse(raw)
+      const record = isRecord(parsed) ? parsed : {}
 
       // SCHEMA_VERSION tracks AppSettings' shape specifically (see its
       // definition above) — a mismatch resets settings only, not
-      // lastStatus/history, which aren't what this version describes.
-      // Missing version (parsed.version === undefined, e.g. a file from
-      // before this field existed) also counts as a mismatch — there's
-      // nothing to compare it against, so it's treated the same as an
-      // explicit different number.
-      const versionMatches = parsed.version === SCHEMA_VERSION
+      // history, which isn't what this version describes. A missing
+      // version (a file from before the field existed) counts as a
+      // mismatch: there's nothing to compare against.
+      const versionMatches = record.version === SCHEMA_VERSION
       if (!versionMatches) {
         console.warn(
           `[StorageService] Settings schema version mismatch (file: ${
-            parsed.version ?? 'none'
+            typeof record.version === 'number' ? record.version : 'none'
           }, expected: ${SCHEMA_VERSION}) — resetting settings to defaults.`
         )
       }
 
       return {
         version: SCHEMA_VERSION,
-        settings: versionMatches ? validateSettings(parsed.settings) : DEFAULT_SETTINGS,
-        lastStatus: parsed.lastStatus ?? null,
-        history: Array.isArray(parsed.history) ? parsed.history.slice(0, MAX_HISTORY) : [],
+        settings: versionMatches ? validateSettings(record.settings) : DEFAULT_SETTINGS,
+        history: validateHistory(record.history),
       }
     } catch (error) {
       // ENOENT (no file yet) is the normal first-launch case, not a
@@ -237,23 +225,31 @@ export class StorageService {
       // JSON, permissions — is a genuine corrupted-file case.
       const isMissingFile = (error as NodeJS.ErrnoException)?.code === 'ENOENT'
       if (!isMissingFile) {
-        console.warn('[StorageService] Data file corrupted or unreadable, falling back to defaults:', error)
+        console.warn('[StorageService] Data file unreadable, falling back to defaults:', error)
       }
-      return { version: SCHEMA_VERSION, settings: DEFAULT_SETTINGS, lastStatus: null, history: [] }
+      return { version: SCHEMA_VERSION, settings: DEFAULT_SETTINGS, history: [] }
     }
   }
 
   private save(): void {
+    const target = this.filePath()
+    const tmpPath = `${target}.tmp`
     try {
-      const dir = app.getPath('userData')
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+      fs.mkdirSync(path.dirname(target), { recursive: true })
       // Atomic write: temp file + rename, so a crash mid-write can't
       // leave a truncated/corrupt JSON file behind.
-      const tmpPath = this.filePath() + '.tmp'
       fs.writeFileSync(tmpPath, JSON.stringify(this.data, null, 2), 'utf-8')
-      fs.renameSync(tmpPath, this.filePath())
+      fs.renameSync(tmpPath, target)
     } catch (error) {
-      console.error('[StorageService] Failed to save:', error)
+      // A failed save is not fatal — the in-memory copy stays correct
+      // for this session, so the app keeps working with the user's
+      // choices; only persistence across restarts is lost.
+      console.error('[StorageService] Failed to save app data:', error)
+      try {
+        fs.rmSync(tmpPath, { force: true })
+      } catch {
+        // Nothing more to do; a stray .tmp file is harmless.
+      }
     }
   }
 }

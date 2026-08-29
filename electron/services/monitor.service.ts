@@ -1,269 +1,362 @@
 import https from 'node:https'
+import type {
+  ConfirmedStatus,
+  ConnectivityState,
+  ConnectivityStatus,
+  RetryProfile,
+} from '../shared/types'
+import { RETRY_STRATEGY_PRESETS } from '../shared/types'
 
-/** Statuses the internal state machine actually settles into. */
-export type ConfirmedStatus = 'ONLINE' | 'DEGRADED' | 'OFFLINE'
+export type { ConfirmedStatus, ConnectivityState, ConnectivityStatus }
 
-/** Everything the UI can be shown — confirmed statuses plus the
- *  transient grace period while a failure is being verified. */
-export type ConnectivityStatus = ConfirmedStatus | 'VERIFYING'
-
-export interface ConnectivityState {
-  status: ConnectivityStatus
-  lastChecked: string | null
-  /** When the current OFFLINE stretch began; null whenever not OFFLINE. */
-  offlineSince: string | null
-  /** When the confirmed status last actually changed; null before the
-   *  first transition. Distinct from lastChecked, which advances on
-   *  every probe regardless of whether the status changed. */
-  statusChangedAt: string | null
-  isMonitoring: boolean
-}
+/** Called after every probe, and on start/stop. `statusChanged` is true
+ *  only when the reported status actually differs from the previous
+ *  report — the signal for one-shot side effects (notification, history,
+ *  tray icon) as opposed to the continuous state push to the renderer. */
+export type MonitorListener = (state: ConnectivityState, statusChanged: boolean) => void
 
 interface MonitorServiceOptions {
   intervalMs?: number
-  checkUrl?: string
-  requestTimeoutMs?: number
-  /** How long a failure is held in VERIFYING before it's trusted. */
-  offlineDebounceMs?: number
-  /** Minimum time between two reported status changes, to damp flapping. */
-  transitionCooldownMs?: number
-  onStatusChange?: (state: ConnectivityState) => void
+  profile?: RetryProfile
+  /** Probed round-robin; overridable for tests. */
+  endpoints?: readonly string[]
+  onUpdate?: MonitorListener
 }
 
 const DEFAULT_INTERVAL_MS = 10_000
-const DEFAULT_CHECK_URL = 'https://www.google.com'
-const DEFAULT_REQUEST_TIMEOUT_MS = 5_000
-const DEFAULT_OFFLINE_DEBOUNCE_MS = 3_000
-const DEFAULT_TRANSITION_COOLDOWN_MS = 5_000
+const MIN_SCHEDULE_MS = 500
 
 /**
- * Polls a well-known HTTPS endpoint on a fixed interval to determine
- * whether the machine currently has internet connectivity.
+ * Rotated one per probe rather than hammering a single host. A provider
+ * outage, a poisoned DNS entry, or one CDN edge having a bad minute then
+ * cannot produce the consecutive-failure streak that OFFLINE requires —
+ * confirming an outage means several different, independently operated
+ * endpoints all failed in a row.
+ */
+const DEFAULT_ENDPOINTS = [
+  'https://www.gstatic.com/generate_204',
+  'https://cloudflare.com/cdn-cgi/trace',
+  'https://www.msftconnecttest.com/connecttest.txt',
+] as const
+
+/**
+ * Decides whether this machine currently has internet access, by polling
+ * small well-known HTTPS endpoints.
  *
- * State machine, in four parts:
- *  - probe(): pure network I/O — did one HTTPS request succeed or not.
- *  - handleProbeResult(): decides what a probe result MEANS — a single
- *    failure enters VERIFYING (offlineDebounceMs) rather than being
- *    trusted immediately, since a one-off blip isn't "the internet is
- *    down". VERIFYING is display-only — it never becomes previousStatus,
- *    so it can't distort the real ONLINE/DEGRADED/OFFLINE comparisons.
- *  - commitStatus(): decides what actually gets REPORTED as the
- *    confirmed status — applies the transition cooldown so a flapping
- *    connection doesn't visibly thrash, tracks offlineSince, then logs
- *    and notifies only on a real, allowed change.
- *  - notify(): the single, safe path every status push goes through.
+ * The whole engine is one loop and one verdict rule:
+ *
+ *  - A single self-scheduling timer. The next probe is only scheduled
+ *    once the previous one has resolved, so two probes can never be in
+ *    flight and start() twice cannot produce two loops.
+ *  - Verdicts come from consecutive-result streaks, nothing else. A
+ *    failure does not mean OFFLINE; `failureThreshold` failures in a row
+ *    does. A success while OFFLINE does not mean ONLINE;
+ *    `recoveryThreshold` successes in a row does. That single rule is
+ *    what absorbs packet loss, DNS hiccups, adapter transitions and slow
+ *    responses — there is no second debounce timer or transition
+ *    cooldown that could disagree with it.
+ *  - VERIFYING is derived, never stored: it is simply "a failure streak
+ *    is open, or no verdict exists yet". It cannot get stuck, because
+ *    there is no state to get stuck in.
+ *  - Every probe result carries the `runId` it was started under. stop()
+ *    and start() bump that id, so a reply arriving from a previous
+ *    monitoring cycle is discarded instead of mutating fresh state.
  */
 export class MonitorService {
   private intervalMs: number
-  private readonly checkUrl: string
-  private requestTimeoutMs: number
-  private offlineDebounceMs: number
-  private transitionCooldownMs: number
-  private readonly onStatusChange?: (state: ConnectivityState) => void
+  private profile: RetryProfile
+  private readonly endpoints: readonly string[]
+  private readonly onUpdate?: MonitorListener
 
   private timer: NodeJS.Timeout | null = null
-  private offlineConfirmTimer: NodeJS.Timeout | null = null
-  private isVerifying = false
-  private lastTransitionAt = 0
-  private state: {
-    status: ConfirmedStatus
-    lastChecked: string | null
-    offlineSince: string | null
-  } = {
-    status: 'OFFLINE',
-    lastChecked: null,
-    offlineSince: null,
-  }
+  private running = false
+  private probeInFlight = false
+  private runId = 0
+  private endpointIndex = 0
+
+  /** null until the first probe of a monitoring cycle produces a verdict. */
+  private confirmed: ConfirmedStatus | null = null
+  private failureStreak = 0
+  private successStreak = 0
+  private firstFailureAt: number | null = null
+  private lastInstabilityAt: number | null = null
+  private lastChecked: number | null = null
+  private offlineSince: number | null = null
+  private statusChangedAt: number | null = null
+  private reportedStatus: ConnectivityStatus = 'VERIFYING'
 
   constructor(options: MonitorServiceOptions = {}) {
     this.intervalMs = options.intervalMs ?? DEFAULT_INTERVAL_MS
-    this.checkUrl = options.checkUrl ?? DEFAULT_CHECK_URL
-    this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS
-    this.offlineDebounceMs = options.offlineDebounceMs ?? DEFAULT_OFFLINE_DEBOUNCE_MS
-    this.transitionCooldownMs = options.transitionCooldownMs ?? DEFAULT_TRANSITION_COOLDOWN_MS
-    this.onStatusChange = options.onStatusChange
+    this.profile = options.profile ?? RETRY_STRATEGY_PRESETS.normal
+    this.endpoints = options.endpoints?.length ? options.endpoints : DEFAULT_ENDPOINTS
+    this.onUpdate = options.onUpdate
   }
 
+  // ---- lifecycle -------------------------------------------------------
+
+  /** Idempotent: starting an already-running monitor does nothing at all
+   *  (no extra timer, no extra probe, no duplicate report). */
   start(): void {
-    if (this.timer) return
-    this.timer = setInterval(() => this.runCheck(), this.intervalMs)
-    this.runCheck()
-    this.notify()
+    if (this.running) return
+    this.running = true
+    this.beginCycle()
+    this.publish()
+    this.tick()
   }
 
+  /** Idempotent, and total: the timer is cleared and any in-flight probe
+   *  is orphaned by the runId bump, so no monitoring activity of any
+   *  kind survives this call. */
   stop(): void {
-    if (!this.timer) return
-    clearInterval(this.timer)
-    this.timer = null
-    this.cancelPendingOfflineConfirmation()
-    this.notify()
+    if (!this.running) return
+    this.running = false
+    this.clearTimer()
+    this.runId += 1
+    this.probeInFlight = false
+    this.resetStreaks()
+    this.publish()
   }
 
   isRunning(): boolean {
-    return this.timer !== null
+    return this.running
   }
 
   getState(): ConnectivityState {
+    const status = this.deriveStatus()
     return {
-      status: this.isVerifying ? 'VERIFYING' : this.state.status,
-      lastChecked: this.state.lastChecked,
-      offlineSince: this.state.offlineSince,
-      statusChangedAt: this.lastTransitionAt > 0 ? new Date(this.lastTransitionAt).toISOString() : null,
-      isMonitoring: this.isRunning(),
+      status,
+      lastChecked: toIso(this.lastChecked),
+      offlineSince: status === 'OFFLINE' ? toIso(this.offlineSince) : null,
+      statusChangedAt: toIso(this.statusChangedAt),
+      isMonitoring: this.running,
     }
   }
 
-  /** Applies new tunables to a service that may already be running —
-   *  used when the user changes monitoring settings live. Does not touch
-   *  checkUrl (not a user-facing setting) or restart any in-flight
-   *  VERIFYING cycle; it'll pick up the new values on its next probe. */
-  updateConfig(options: {
-    intervalMs?: number
-    requestTimeoutMs?: number
-    offlineDebounceMs?: number
-    transitionCooldownMs?: number
-  }): void {
+  /** Applies new tunables to a monitor that may already be running. A
+   *  changed interval reschedules the pending probe immediately rather
+   *  than waiting out the remainder of the old one. */
+  updateConfig(options: { intervalMs?: number; profile?: RetryProfile }): void {
+    const previousInterval = this.intervalMs
     if (options.intervalMs !== undefined) this.intervalMs = options.intervalMs
-    if (options.requestTimeoutMs !== undefined) this.requestTimeoutMs = options.requestTimeoutMs
-    if (options.offlineDebounceMs !== undefined) this.offlineDebounceMs = options.offlineDebounceMs
-    if (options.transitionCooldownMs !== undefined) {
-      this.transitionCooldownMs = options.transitionCooldownMs
-    }
+    if (options.profile !== undefined) this.profile = options.profile
 
-    // Restart the interval so a new check cadence takes effect right
-    // away instead of waiting out whatever's left of the old one.
-    if (this.timer) {
-      clearInterval(this.timer)
-      this.timer = setInterval(() => this.runCheck(), this.intervalMs)
+    if (this.running && !this.probeInFlight && this.intervalMs !== previousInterval) {
+      this.clearTimer()
+      this.scheduleNext()
     }
   }
 
-  // ---- network I/O ----------------------------------------------------
+  /** Releases the timer so the process can exit cleanly. */
+  dispose(): void {
+    this.stop()
+  }
 
-  /** Runs one HTTPS probe. Never throws — reports failure instead. */
-  private probe(onResult: (succeeded: boolean) => void): void {
+  // ---- the loop --------------------------------------------------------
+
+  private beginCycle(): void {
+    // A fresh cycle knows nothing yet: no stale verdict, and no offline
+    // clock covering a period this monitor wasn't watching. Reporting
+    // VERIFYING until the first probe lands is what stops a cold start
+    // from announcing a fake OFFLINE (and alarming about it).
+    this.runId += 1
+    this.confirmed = null
+    this.offlineSince = null
+    this.lastInstabilityAt = null
+    this.resetStreaks()
+  }
+
+  private resetStreaks(): void {
+    this.failureStreak = 0
+    this.successStreak = 0
+    this.firstFailureAt = null
+  }
+
+  private clearTimer(): void {
+    if (this.timer) {
+      clearTimeout(this.timer)
+      this.timer = null
+    }
+  }
+
+  private scheduleNext(): void {
+    if (!this.running || this.timer) return
+    const base = this.isSettled() ? this.intervalMs : Math.min(this.profile.verifyIntervalMs, this.intervalMs)
+    this.timer = setTimeout(() => {
+      this.timer = null
+      this.tick()
+    }, Math.max(MIN_SCHEDULE_MS, base))
+  }
+
+  /** True when nothing is pending confirmation, so the relaxed interval
+   *  applies. While offline we stay on the faster cadence so recovery is
+   *  noticed promptly — failed probes are cheap. */
+  private isSettled(): boolean {
+    return this.confirmed !== null && this.confirmed !== 'OFFLINE' && this.failureStreak === 0
+  }
+
+  private tick(): void {
+    if (!this.running || this.probeInFlight) return
+
+    const runId = this.runId
+    const url = this.endpoints[this.endpointIndex % this.endpoints.length]
+    this.endpointIndex = (this.endpointIndex + 1) % this.endpoints.length
+    this.probeInFlight = true
+    const startedAt = Date.now()
+
+    this.probe(url, (succeeded) => {
+      // A reply from a monitoring cycle that has since been stopped or
+      // restarted must not touch current state, or schedule anything.
+      if (runId !== this.runId) return
+      this.probeInFlight = false
+      this.applyProbeResult(succeeded, Date.now() - startedAt)
+      this.scheduleNext()
+    })
+  }
+
+  // ---- network I/O -----------------------------------------------------
+
+  /** One HTTPS probe. Never throws, and calls back exactly once. */
+  private probe(url: string, done: (succeeded: boolean) => void): void {
+    let settled = false
+    const finish = (succeeded: boolean): void => {
+      if (settled) return
+      settled = true
+      done(succeeded)
+    }
+
     try {
-      let settled = false
-
-      const request = https.get(this.checkUrl, { timeout: this.requestTimeoutMs }, (response) => {
-        // Headers received: the network path is confirmed up. Drop the
-        // body immediately — we don't need the page content.
-        response.destroy()
-        if (settled) return
-        settled = true
-        onResult(true)
-      })
+      const request = https.get(
+        url,
+        {
+          timeout: this.profile.requestTimeoutMs,
+          // A fresh connection every time: a pooled socket that died
+          // with the network would otherwise report success from cache
+          // or fail for reasons unrelated to current connectivity.
+          agent: false,
+          headers: { 'cache-control': 'no-cache', accept: '*/*' },
+        },
+        (response) => {
+          // Headers arrived, so the full DNS -> TCP -> TLS -> HTTP path
+          // works. The body is irrelevant; drop it immediately.
+          response.destroy()
+          request.destroy()
+          finish(true)
+        }
+      )
 
       request.on('timeout', () => {
-        request.destroy(new Error('Connectivity check timed out'))
+        request.destroy(new Error(`Connectivity probe timed out: ${url}`))
       })
 
-      request.on('error', () => {
-        if (settled) return
-        settled = true
-        onResult(false)
-      })
+      // Covers DNS failure, refused/reset connections, TLS errors and
+      // the timeout above. All of them mean the same thing here.
+      request.on('error', () => finish(false))
     } catch {
-      // Couldn't even start the request (e.g. a malformed checkUrl) —
-      // that's a failure like any other, not a crash.
-      onResult(false)
+      // Could not even start the request (e.g. a malformed URL). That's
+      // a failed probe, not a crash.
+      finish(false)
     }
   }
 
-  private runCheck(): void {
-    const isFirstCheck = this.state.lastChecked === null
-    this.probe((succeeded) => this.handleProbeResult(succeeded, isFirstCheck))
-  }
+  // ---- the verdict rule ------------------------------------------------
 
-  // ---- interpreting a probe result -------------------------------------
+  private applyProbeResult(succeeded: boolean, latencyMs: number): void {
+    const now = Date.now()
+    this.lastChecked = now
 
-  private handleProbeResult(succeeded: boolean, isFirstCheck: boolean): void {
     if (succeeded) {
-      this.cancelPendingOfflineConfirmation()
-      this.commitStatus('ONLINE', isFirstCheck)
+      this.failureStreak = 0
+      this.firstFailureAt = null
+      this.successStreak += 1
+      // A response this slow is a working connection behaving badly —
+      // an unstable-network signal, not an outage.
+      if (latencyMs >= this.profile.slowResponseMs) this.lastInstabilityAt = now
+      this.applySuccess(now)
+    } else {
+      this.successStreak = 0
+      this.failureStreak += 1
+      this.lastInstabilityAt = now
+      if (this.firstFailureAt === null) this.firstFailureAt = now
+      this.applyFailure(now)
+    }
+
+    this.publish()
+  }
+
+  private applySuccess(now: number): void {
+    if (this.confirmed === null) {
+      // First verdict of the cycle. A success is unambiguous — there is
+      // no prior state it could be contradicting — so it lands directly.
+      this.setConfirmed('ONLINE', now)
       return
     }
 
-    // Nothing to verify against yet, or we're already confirmed down —
-    // report immediately.
-    if (isFirstCheck || this.state.status === 'OFFLINE') {
-      this.commitStatus('OFFLINE', isFirstCheck)
+    if (this.confirmed === 'OFFLINE') {
+      // Recovery is verified the same way loss is: it takes a streak.
+      // One success during an outage is exactly the kind of blip that
+      // would otherwise make the status (and the alarm) flap.
+      if (this.successStreak >= this.profile.recoveryThreshold) {
+        this.setConfirmed('ONLINE', now)
+      }
       return
     }
 
-    // A single failure from ONLINE/DEGRADED might just be a blip. Show
-    // the user we're checking rather than immediately alarming them.
-    this.enterVerifying()
+    // ONLINE or DEGRADED. Recent instability keeps it DEGRADED until the
+    // connection has been clean for the whole grace window.
+    const unstable =
+      this.lastInstabilityAt !== null && now - this.lastInstabilityAt < this.profile.degradedGraceMs
+    this.setConfirmed(unstable ? 'DEGRADED' : 'ONLINE', now)
   }
 
-  private enterVerifying(): void {
-    if (this.offlineConfirmTimer) return // already verifying a failure
-
-    this.isVerifying = true
-    // Deliberately bypasses the transition cooldown and goes straight to
-    // notify() — this is transient UI feedback ("we're checking"), not a
-    // confirmed status change, so nothing about holding it back applies.
-    this.notify()
-
-    this.offlineConfirmTimer = setTimeout(() => {
-      this.offlineConfirmTimer = null
-      this.probe((succeeded) => {
-        this.isVerifying = false
-        // Recovered by the time we re-checked — but a real failure DID
-        // just happen, so this is a degraded connection, not a clean one.
-        this.commitStatus(succeeded ? 'DEGRADED' : 'OFFLINE', false)
-      })
-    }, this.offlineDebounceMs)
+  private applyFailure(now: number): void {
+    if (this.failureStreak < this.profile.failureThreshold) return
+    this.setConfirmed('OFFLINE', now)
   }
 
-  private cancelPendingOfflineConfirmation(): void {
-    if (this.offlineConfirmTimer) {
-      clearTimeout(this.offlineConfirmTimer)
-      this.offlineConfirmTimer = null
+  private setConfirmed(next: ConfirmedStatus, now: number): void {
+    if (next === 'OFFLINE') {
+      // Dated from the first failure of the streak that proved it, not
+      // from the moment the verdict landed — that first failure is when
+      // the connection actually stopped working.
+      if (this.confirmed !== 'OFFLINE' || this.offlineSince === null) {
+        this.offlineSince = this.firstFailureAt ?? now
+      }
+    } else {
+      this.offlineSince = null
     }
-    this.isVerifying = false
+    this.confirmed = next
   }
 
-  // ---- committing + reporting a status --------------------------------
+  // ---- reporting -------------------------------------------------------
 
-  private commitStatus(observedStatus: ConfirmedStatus, isFirstCheck: boolean): void {
-    const previousStatus = this.state.status
-    const wantsTransition = isFirstCheck || observedStatus !== previousStatus
-    const cooldownBlocksIt = wantsTransition && !isFirstCheck && !this.cooldownElapsed()
+  private deriveStatus(): ConnectivityStatus {
+    // No verdict yet, or a failure streak is open but hasn't reached the
+    // threshold: we genuinely don't know, and say so.
+    if (this.confirmed === null) return 'VERIFYING'
+    // Once OFFLINE is confirmed it holds until recovery is confirmed —
+    // dipping through VERIFYING on every hopeful probe would silence the
+    // alarm and hide the overlay mid-outage.
+    if (this.confirmed === 'OFFLINE') return 'OFFLINE'
+    return this.failureStreak > 0 ? 'VERIFYING' : this.confirmed
+  }
 
-    // Cooldown active: hold the previous status for display, but the
-    // check still genuinely happened, so lastChecked still advances below.
-    const nextStatus = cooldownBlocksIt ? previousStatus : observedStatus
-    const didTransition = isFirstCheck || nextStatus !== previousStatus
+  private publish(): void {
+    const status = this.deriveStatus()
+    const statusChanged = status !== this.reportedStatus
 
-    this.state = {
-      status: nextStatus,
-      lastChecked: new Date().toISOString(),
-      offlineSince: this.nextOfflineSince(nextStatus, previousStatus),
+    if (statusChanged) {
+      this.reportedStatus = status
+      this.statusChangedAt = Date.now()
     }
 
-    if (didTransition) {
-      this.lastTransitionAt = Date.now()
-      this.notify()
-    }
-  }
-
-  /** Starts the offline clock on a fresh drop, holds it steady while
-   *  still down, and clears it the moment we're not fully OFFLINE. */
-  private nextOfflineSince(nextStatus: ConfirmedStatus, previousStatus: ConfirmedStatus): string | null {
-    if (nextStatus !== 'OFFLINE') return null
-    return previousStatus === 'OFFLINE' ? this.state.offlineSince : new Date().toISOString()
-  }
-
-  private cooldownElapsed(): boolean {
-    return Date.now() - this.lastTransitionAt >= this.transitionCooldownMs
-  }
-
-  private notify(): void {
     try {
-      this.onStatusChange?.(this.getState())
+      this.onUpdate?.(this.getState(), statusChanged)
     } catch (error) {
-      console.error('[MonitorService] onStatusChange listener threw:', error)
+      console.error('[MonitorService] update listener threw:', error)
     }
   }
+}
+
+function toIso(value: number | null): string | null {
+  return value === null ? null : new Date(value).toISOString()
 }

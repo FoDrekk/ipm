@@ -21,6 +21,21 @@ function ClockIcon() {
   )
 }
 
+/** Stored data is validated in the main process before it gets here, but
+ *  this screen renders whatever it is handed and a crash would take the
+ *  whole Settings view with it — so an unrecognised status degrades to
+ *  plain text, and an unparseable timestamp to a dash. */
+function statusClass(status: string): string {
+  return status in STATUS_INFO
+    ? STATUS_INFO[status as keyof typeof STATUS_INFO].text
+    : 'text-slate-400'
+}
+
+function formatTimestamp(value: string): string {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString()
+}
+
 export default function HistoryList({ events }: HistoryListProps) {
   if (events.length === 0) {
     return (
@@ -35,13 +50,15 @@ export default function HistoryList({ events }: HistoryListProps) {
 
   return (
     <ul className="flex max-h-56 flex-col gap-2 overflow-y-auto pr-1">
-      {events.map((event) => (
+      {events.map((event, index) => (
         <li
-          key={event.at}
+          // Index-qualified: two events sharing a timestamp would
+          // otherwise collide on a duplicate React key.
+          key={`${event.at}-${index}`}
           className="animate-fade-in flex items-center justify-between rounded-lg bg-slate-800/60 px-3 py-2 text-sm"
         >
-          <span className={`font-medium ${STATUS_INFO[event.status].text}`}>{event.status}</span>
-          <span className="text-slate-500">{new Date(event.at).toLocaleString()}</span>
+          <span className={`font-medium ${statusClass(event.status)}`}>{event.status}</span>
+          <span className="text-slate-500">{formatTimestamp(event.at)}</span>
         </li>
       ))}
     </ul>
