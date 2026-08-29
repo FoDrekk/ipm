@@ -1,7 +1,11 @@
-/** Formats an ISO timestamp as a short human-readable relative string. */
+/** Formats an ISO timestamp as a short human-readable relative string.
+ *  An unparseable timestamp renders as a dash rather than "NaN seconds
+ *  ago" — this is displayed text, not a place to surface a data problem. */
 export function formatRelativeTime(timestamp: string): string {
-  const diffMs = Date.now() - new Date(timestamp).getTime()
-  const diffSeconds = Math.max(0, Math.round(diffMs / 1000))
+  const then = new Date(timestamp).getTime()
+  if (Number.isNaN(then)) return '—'
+
+  const diffSeconds = Math.max(0, Math.round((Date.now() - then) / 1000))
 
   if (diffSeconds < 5) return 'just now'
   if (diffSeconds < 60) return `${diffSeconds} seconds ago`

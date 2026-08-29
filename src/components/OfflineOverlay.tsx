@@ -1,56 +1,45 @@
 import { useEffect, useState } from 'react'
-import { useAlarm } from '../hooks/useAlarm'
 import { useOfflineDuration } from '../hooks/useOfflineDuration'
 import type { AppSettings } from '../ipc/ipc-client'
 import StatusIcon from './StatusIcon'
 import ToggleSwitch from './ToggleSwitch'
 
 interface OfflineOverlayProps {
-  /** True only while genuinely OFFLINE right now. False during the exit
-   *  fade window even though the parent keeps this mounted then. */
+  /** True while genuinely offline. False during the exit fade, when the
+   *  parent still keeps this mounted for a moment. */
   isActive: boolean
   offlineSince: string | null
   settings: AppSettings
   onUpdateSettings: (partial: Partial<AppSettings>) => void
+  isSnoozed: boolean
+  onSnooze: () => void
 }
 
-const SNOOZE_MS = 30_000
-
 /**
- * The parent controls whether this is mounted at all (real offline state
- * plus a short exit-transition grace period). Everything in here reacts
- * to `isActive` directly rather than to its own mount/unmount, since
- * those two no longer coincide during the exit fade.
+ * The full-screen offline alert. Purely visual: the alarm it used to own
+ * now lives at the app root, so dismissing this with Esc, or letting it
+ * unmount after the fade, has no effect on whether the alarm sounds —
+ * only on whether the alert is on screen.
+ *
+ * Mounting is entirely the parent's decision (offline, plus a short exit
+ * window), so there are no delay timers of its own to get out of step
+ * with the reported status.
  */
 export default function OfflineOverlay({
   isActive,
   offlineSince,
   settings,
   onUpdateSettings,
+  isSnoozed,
+  onSnooze,
 }: OfflineOverlayProps) {
   const [isDismissed, setIsDismissed] = useState(false)
-  const [snoozedUntil, setSnoozedUntil] = useState<number | null>(null)
-
-  const isSnoozed = snoozedUntil !== null
-  // Snoozing is just another reason the alarm shouldn't sound right now —
-  // it doesn't change isActive itself (we're still genuinely offline),
-  // only what useAlarm is told.
-  useAlarm({
-    active: isActive && !isSnoozed,
-    enabled: settings.alarm.enabled,
-    volume: settings.alarm.volume,
-    sound: settings.alarm.sound,
-  })
   const duration = useOfflineDuration(offlineSince)
 
-  // A fresh outage should always show, even if the last one was
-  // dismissed with Escape. Also clears any leftover snooze so a new
-  // outage starts with the alarm active, not silently snoozed from before.
+  // A fresh outage always shows, even if the previous one was dismissed
+  // with Esc while this component happened to stay mounted.
   useEffect(() => {
-    if (isActive) {
-      setIsDismissed(false)
-      setSnoozedUntil(null)
-    }
+    if (isActive) setIsDismissed(false)
   }, [isActive])
 
   useEffect(() => {
@@ -61,22 +50,6 @@ export default function OfflineOverlay({
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [])
 
-  // Auto-clears the snooze after SNOOZE_MS, and correctly handles a
-  // snooze that got extended (or already elapsed) rather than assuming
-  // a fixed delay from when this effect happened to run.
-  useEffect(() => {
-    if (snoozedUntil === null) return
-    const remaining = snoozedUntil - Date.now()
-    if (remaining <= 0) {
-      setSnoozedUntil(null)
-      return
-    }
-    const timer = setTimeout(() => setSnoozedUntil(null), remaining)
-    return () => clearTimeout(timer)
-  }, [snoozedUntil])
-
-  // Escape hides the visual only — the alarm hook above is untouched by
-  // isDismissed, so sound keeps going exactly as intended.
   if (isDismissed) return null
 
   return (
@@ -93,7 +66,7 @@ export default function OfflineOverlay({
 
       <button
         type="button"
-        onClick={() => setSnoozedUntil(Date.now() + SNOOZE_MS)}
+        onClick={onSnooze}
         disabled={isSnoozed}
         className="mt-2 rounded-lg bg-slate-800/80 px-4 py-2 text-sm font-medium text-slate-200 transition-colors duration-150 hover:bg-slate-700 active:scale-95 disabled:cursor-default disabled:opacity-50"
       >

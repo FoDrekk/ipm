@@ -11,9 +11,13 @@
     "dev:vite": "vite",
     "dev:tsc": "tsc -p tsconfig.electron.json --watch --preserveWatchOutput",
     "dev:electron": "wait-on tcp:5173 dist-electron/main.js && cross-env NODE_ENV=development electron .",
+    "typecheck": "npm run typecheck:renderer && npm run typecheck:electron",
+    "typecheck:renderer": "tsc --noEmit -p tsconfig.json",
+    "typecheck:electron": "tsc --noEmit -p tsconfig.electron.json",
+    "test": "npm run build:electron && node --test \"tests/*.test.js\"",
     "build:renderer": "vite build",
     "build:electron": "tsc -p tsconfig.electron.json",
-    "build": "npm run build:renderer && npm run build:electron",
+    "build": "npm run typecheck:renderer && npm run build:renderer && npm run build:electron",
     "start": "cross-env NODE_ENV=production electron .",
     "dist:win": "npm run build && electron-builder --win",
     "dist": "npm run build && electron-builder"
@@ -54,6 +58,10 @@
       {
         "from": "assets/tray",
         "to": "assets/tray"
+      },
+      {
+        "from": "assets/icons",
+        "to": "assets/icons"
       }
     ],
     "win": {

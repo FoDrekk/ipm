@@ -1,8 +1,11 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import type { AppSettings, HistoryEvent, RetryStrategy } from '../ipc/ipc-client'
 import { getHistory } from '../ipc/ipc-client'
-import { ALARM_SOUND_OPTIONS, ALARM_SOUND_SOURCES, type AlarmSound } from '../utils/alarmSounds'
+import { ALARM_SOUND_OPTIONS, type AlarmSound } from '../utils/alarmSounds'
+import { alarmEngine } from '../audio/alarmEngine'
+import { useConnectivityStore } from '../state/connectivity.store'
 import { useExitTransition } from '../hooks/useExitTransition'
+import { useAutostart } from '../hooks/useAutostart'
 import ToggleSwitch from '../components/ToggleSwitch'
 import SegmentedControl from '../components/SegmentedControl'
 import VolumeSlider from '../components/VolumeSlider'
@@ -36,8 +39,7 @@ const TEST_ALARM_DURATION_MS = 2_000
 const SAVED_EXIT_MS = 200
 
 // One bordered card per settings group — the border/background does the
-// grouping, so the divider lines the old layout used between sections
-// aren't needed anymore.
+// grouping, so no divider lines between sections are needed.
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="flex flex-col gap-3 rounded-xl border border-slate-800/70 bg-slate-900/40 p-4">
@@ -58,11 +60,17 @@ function FieldLabel({ children, description }: { children: string; description?:
 
 export default function SettingsPanel({ settings, onUpdate, onBack, justSaved }: SettingsPanelProps) {
   const [history, setHistory] = useState<HistoryEvent[]>([])
-  const testAudioRef = useRef<HTMLAudioElement | null>(null)
+  const { enabled: autostart, setEnabled: setAutostart } = useAutostart()
+
+  // The engine refuses a test while the outage alarm is sounding — one
+  // audio source, so they cannot overlap. Reflecting that in the button
+  // makes the refusal visible instead of a click that does nothing.
+  const isAlarmSounding = useConnectivityStore(
+    (state) => state.isMonitoring && state.status === 'OFFLINE'
+  )
 
   // Keeps the "Saved" text mounted for SAVED_EXIT_MS after justSaved goes
-  // false so it can fade out instead of vanishing — same pattern the
-  // offline overlay already uses for its own exit transition.
+  // false so it can fade out instead of vanishing.
   const showSavedIndicator = useExitTransition(justSaved, SAVED_EXIT_MS)
 
   useEffect(() => {
@@ -72,35 +80,24 @@ export default function SettingsPanel({ settings, onUpdate, onBack, justSaved }:
         if (!cancelled) setHistory(events)
       })
       .catch((error: unknown) => {
-        console.error('[SettingsPanel] Failed to fetch history:', error)
+        console.error('[settings] failed to load history:', error)
       })
     return () => {
       cancelled = true
     }
   }, [])
 
-  // Guards against overlapping test playback (no overlapping sounds) and
-  // stops a still-playing test if the panel closes early.
+  // Leaving this screen stops a test tone that is still playing. A real
+  // alarm is untouched: the engine only ever stops what it started as a
+  // test, so navigating away mid-outage cannot silence the alert.
   useEffect(() => {
     return () => {
-      testAudioRef.current?.pause()
-      testAudioRef.current = null
+      alarmEngine.stopTest()
     }
   }, [])
 
   function handleTestAlarm(): void {
-    if (testAudioRef.current) return
-    const audio = new Audio(ALARM_SOUND_SOURCES[settings.alarm.sound])
-    audio.volume = settings.alarm.volume / 100
-    testAudioRef.current = audio
-    audio.play().catch((error: unknown) => {
-      console.warn('[SettingsPanel] Test alarm playback failed:', error)
-      testAudioRef.current = null
-    })
-    setTimeout(() => {
-      testAudioRef.current?.pause()
-      testAudioRef.current = null
-    }, TEST_ALARM_DURATION_MS)
+    alarmEngine.playTest(settings.alarm.sound, settings.alarm.volume, TEST_ALARM_DURATION_MS)
   }
 
   return (
@@ -143,9 +140,10 @@ export default function SettingsPanel({ settings, onUpdate, onBack, justSaved }:
             <button
               type="button"
               onClick={handleTestAlarm}
-              className="self-start rounded-lg bg-slate-800 px-3 py-2 text-sm font-medium text-slate-200 transition-colors duration-150 hover:bg-slate-700 active:scale-95"
+              disabled={isAlarmSounding}
+              className="self-start rounded-lg bg-slate-800 px-3 py-2 text-sm font-medium text-slate-200 transition-colors duration-150 hover:bg-slate-700 active:scale-95 disabled:cursor-default disabled:opacity-50 disabled:hover:bg-slate-800"
             >
-              Test Alarm
+              {isAlarmSounding ? 'Alarm is sounding' : 'Test Alarm'}
             </button>
           </Section>
 
@@ -182,7 +180,7 @@ export default function SettingsPanel({ settings, onUpdate, onBack, justSaved }:
               />
             </div>
             <div>
-              <FieldLabel description="Aggressive reacts to changes sooner; Normal is more conservative">
+              <FieldLabel description="Aggressive confirms a drop after fewer failed checks; Normal waits for more">
                 Retry strategy
               </FieldLabel>
               <SegmentedControl
@@ -193,6 +191,19 @@ export default function SettingsPanel({ settings, onUpdate, onBack, justSaved }:
                 }
               />
             </div>
+          </Section>
+
+          <Section title="Startup">
+            <ToggleSwitch
+              checked={autostart ?? false}
+              onChange={setAutostart}
+              label="Launch on startup"
+              description={
+                autostart === null
+                  ? 'Reading the current Windows setting…'
+                  : 'Start Internet Monitor Pro automatically when you sign in to Windows'
+              }
+            />
           </Section>
 
           <Section title="Recent Activity">
