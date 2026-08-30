@@ -1,9 +1,14 @@
 import { useConnectivityStore } from '../state/connectivity.store'
 import { useRelativeTime } from '../hooks/useRelativeTime'
+import { useOfflineDuration } from '../hooks/useOfflineDuration'
+import { useStats } from '../hooks/useStats'
 import StatusCard from '../components/StatusCard'
 import StatusIndicator from '../components/StatusIndicator'
 import ToggleSwitch from '../components/ToggleSwitch'
 import MiniStatusBadge from '../components/MiniStatusBadge'
+import LatencyReadout from '../components/LatencyReadout'
+import StatsStrip from '../components/StatsStrip'
+import SimulationBanner from '../components/SimulationBanner'
 
 interface DashboardProps {
   onOpenSettings: () => void
@@ -33,13 +38,20 @@ export default function Dashboard({ onOpenSettings }: DashboardProps) {
   const lastChecked = useConnectivityStore((state) => state.lastChecked)
   const statusChangedAt = useConnectivityStore((state) => state.statusChangedAt)
   const isMonitoring = useConnectivityStore((state) => state.isMonitoring)
+  const latencyMs = useConnectivityStore((state) => state.latencyMs)
+  const offlineSince = useConnectivityStore((state) => state.offlineSince)
+  const isSimulated = useConnectivityStore((state) => state.isSimulated)
   const setMonitoring = useConnectivityStore((state) => state.setMonitoring)
 
   const relativeTime = useRelativeTime(lastChecked)
   const lastCheckedLabel = lastChecked ? relativeTime : isMonitoring ? 'Checking…' : 'Not started'
+  const stats = useStats()
+  const currentOutage = useOfflineDuration(isMonitoring ? offlineSince : null)
 
   return (
     <div className="flex h-screen w-screen flex-col bg-slate-950">
+      {isSimulated && <SimulationBanner />}
+
       <div className="flex items-center justify-between px-5 pt-5">
         <MiniStatusBadge status={status} isMonitoring={isMonitoring} statusChangedAt={statusChangedAt} />
         <button
@@ -56,15 +68,20 @@ export default function Dashboard({ onOpenSettings }: DashboardProps) {
         <StatusCard>
           <StatusIndicator status={status} isMonitoring={isMonitoring} />
 
-          <p className="text-sm text-slate-500">
-            Last checked: <span className="text-slate-300">{lastCheckedLabel}</span>
-          </p>
+          <div className="flex flex-col items-center gap-1">
+            <p className="text-sm text-slate-500">
+              Last checked: <span className="text-slate-300">{lastCheckedLabel}</span>
+            </p>
+            {isMonitoring && <LatencyReadout latencyMs={latencyMs} />}
+          </div>
 
           <div className="h-px w-full bg-slate-800" />
 
           <ToggleSwitch checked={isMonitoring} onChange={setMonitoring} label="Monitoring" />
         </StatusCard>
       </div>
+
+      <StatsStrip stats={stats} currentOutage={currentOutage} />
     </div>
   )
 }

@@ -1,4 +1,4 @@
-import type { ConnectivityStatus } from '../ipc/ipc-client'
+import type { ConnectivityStatus, HistoryStatus } from '../ipc/ipc-client'
 
 export interface StatusVisual {
   message: string
@@ -39,4 +39,14 @@ export const STATUS_INFO: Record<ConnectivityStatus, StatusVisual> = {
     glow: 'shadow-[0_0_16px_rgba(239,68,68,0.65)]',
     pulse: true,
   },
+}
+
+/** Timeline entries include PAUSED, which is not a connectivity status
+ *  and has no place in STATUS_INFO — it says nothing about the
+ *  connection, only that nobody was watching it. */
+export const HISTORY_VISUALS: Record<HistoryStatus, { label: string; text: string }> = {
+  ONLINE: { label: 'ONLINE', text: STATUS_INFO.ONLINE.text },
+  DEGRADED: { label: 'DEGRADED', text: STATUS_INFO.DEGRADED.text },
+  OFFLINE: { label: 'OFFLINE', text: STATUS_INFO.OFFLINE.text },
+  PAUSED: { label: 'PAUSED', text: 'text-slate-500' },
 }

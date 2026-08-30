@@ -6,11 +6,14 @@ A Windows desktop app that continuously monitors your internet connection in the
 
 - Continuous connectivity checks at a configurable interval, running in the main process (not tied to the window being open)
 - Four-state detection — **Connected**, **Unstable Network**, **Checking connection…** and **Connection Lost** — not just up/down. A drop is only treated as real once several checks in a row have failed, against several independent endpoints, so a blip, a DNS hiccup or one slow response never triggers a false alarm
-- Full-screen alert with a progressive alarm (soft → louder → strong) when the connection is genuinely lost, with snooze and Esc-to-dismiss
+- Full-screen alert when the connection is genuinely lost, with snooze and Esc-to-dismiss. The window restores itself from the tray for a confirmed outage, once per incident
+- Two alarm modes — **Continuous** (a progressive soft → louder → strong alarm until the connection returns) and **Once** (a single alert when the outage begins)
+- Live latency reading with a plain-language quality label, and today's uptime, downtime and outage count on the dashboard
 - System tray icon that reflects live status, with quick start/stop monitoring and status at a glance
-- Desktop notifications on connection loss/recovery, with a configurable cooldown
-- Connection history (last 20 events)
-- Optional launch at Windows startup
+- Desktop notifications on connection loss and recovery, carrying the offline start time and the downtime it lasted, with a configurable cooldown
+- Connection history, and statistics derived from it that survive restarts
+- Startup options: launch at Windows startup, start monitoring automatically, start minimized to the tray
+- Diagnostics in Settings: test the alarm, notifications and tray, and simulate a full outage to see the real alert path end to end
 - All settings persist across restarts and are validated/repaired automatically if the settings file is ever corrupted
 
 ## Installing
@@ -71,6 +74,7 @@ internet-monitor-pro/
 │   ├── main.ts                #   entry point, IPC handlers, service wiring
 │   ├── preload.ts             #   contextBridge API surface
 │   ├── shared/types.ts        #   types + defaults shared with the renderer
+│   ├── shared/stats.ts        #   uptime/downtime derived from the timeline
 │   └── services/
 │       ├── monitor.service.ts       # connectivity state machine
 │       ├── tray.service.ts          # system tray
@@ -79,7 +83,7 @@ internet-monitor-pro/
 ├── src/                       # Renderer (React UI)
 │   ├── pages/                  Dashboard, SettingsPanel
 │   ├── components/             StatusCard, StatusIndicator, OfflineOverlay, etc.
-│   ├── hooks/                  useAlarm, useSettings, useAutostart, etc.
+│   ├── hooks/                  useAlarm, useSettings, useStats, useDiagnostics, etc.
 │   ├── audio/                  alarmEngine.ts (the single audio lifecycle)
 │   ├── state/                  connectivity.store.ts (Zustand)
 │   ├── ipc/                    ipc-client.ts
@@ -114,6 +118,28 @@ never guesses on its own.
   has been clean for a grace period.
 - `offlineSince` is dated from the first failed check of the streak, not from
   the moment the verdict landed.
+- Latency is measured and displayed but never consulted: a slow connection can
+  read **Unstable Network**, but no latency figure alone can make it OFFLINE.
+
+### Statistics
+
+Uptime figures come from the same stored timeline the history list shows — no
+second metrics store to drift out of sync, and nothing extra to persist.
+
+Time is only counted while monitoring was actually running: stretches where
+monitoring was paused, or the app was closed, are recorded as `PAUSED` and
+excluded from both uptime and downtime. That is why the app writes a `PAUSED`
+entry as it quits, and repairs the timeline on startup if it never got the
+chance — an app that was closed for eight hours must not report those hours as
+uptime it never observed.
+
+### Diagnostics
+
+Settings → Diagnostics can test the alarm, notifications and the tray, and can
+simulate an outage. The simulation forces the connectivity engine's probes to
+fail and changes nothing else, so the overlay, alarm, notification, window
+restore, history entry and recovery all run through their real code paths. It
+lives in memory only and can never survive a restart.
 
 ### Checks
 

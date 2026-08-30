@@ -1,3 +1,4 @@
+import { ONCE_ALARM_DURATION_MS, type AlarmMode } from '../../electron/shared/types'
 import { ALARM_SOUND_SOURCES, type AlarmSound } from '../utils/alarmSounds'
 
 const TICK_MS = 50
@@ -59,28 +60,48 @@ class AlarmEngine {
   private startedAt = 0
   private ticker: ReturnType<typeof setInterval> | null = null
   private fadingOut = false
-  private testTimer: ReturnType<typeof setTimeout> | null = null
+  private alarmMode: AlarmMode = 'continuous'
+  /** Ends a playback that is meant to stop on its own — a test tone, or
+   *  a `once` alarm. Continuous alarms have no such timer: they stop
+   *  when the connection comes back, and nothing else. */
+  private autoStopTimer: ReturnType<typeof setTimeout> | null = null
   private lastPlayAttemptAt = 0
   private playbackBlocked = false
   /** Bumped by every state change, so a play() promise that settles late
    *  can tell whether it is still the current intent. */
   private generation = 0
 
-  /** Starts the outage alarm, or takes over from a test tone that is
-   *  already playing. Idempotent: calling it again while the alarm is
-   *  sounding updates the settings instead of restarting anything. */
-  startAlarm(sound: AlarmSound, volume: number): void {
-    this.clearTestTimer()
+  /**
+   * Starts the outage alarm, or takes over from a test tone that is
+   * already playing. Idempotent: calling it again while the same alarm
+   * is sounding updates the settings instead of restarting anything.
+   *
+   * `once` differs from `continuous` in two ways and no others: it does
+   * not escalate, and it arms a timer to fade itself out. Everything
+   * else — the single element, the single ticker, stopping on recovery —
+   * is identical, so the two modes cannot drift apart.
+   */
+  startAlarm(sound: AlarmSound, volume: number, mode: AlarmMode = 'continuous'): void {
+    this.clearAutoStop()
     this.volume = volume
 
-    const resuming = this.mode === 'alarm' && !this.fadingOut && this.isPlaying()
+    const resuming =
+      this.mode === 'alarm' && this.alarmMode === mode && !this.fadingOut && this.isPlaying()
     this.mode = 'alarm'
+    this.alarmMode = mode
     this.fadingOut = false
     // A restart after a stop (or after a fade-out began) is a new
     // outage, so the escalation starts over. A no-op re-entry is not.
     if (!resuming) this.startedAt = Date.now()
 
     this.ensurePlaying(sound, true)
+
+    if (mode === 'once') {
+      this.autoStopTimer = setTimeout(() => {
+        this.autoStopTimer = null
+        if (this.mode === 'alarm') this.beginFadeOut()
+      }, ONCE_ALARM_DURATION_MS)
+    }
   }
 
   /** Applies live setting changes without interrupting playback: the
@@ -111,7 +132,7 @@ class AlarmEngine {
   playTest(sound: AlarmSound, volume: number, durationMs: number): void {
     if (this.mode === 'alarm') return
 
-    this.clearTestTimer()
+    this.clearAutoStop()
     this.mode = 'test'
     this.fadingOut = false
     this.volume = volume
@@ -122,8 +143,8 @@ class AlarmEngine {
     // sample ends.
     this.restart(sound, true)
 
-    this.testTimer = setTimeout(() => {
-      this.testTimer = null
+    this.autoStopTimer = setTimeout(() => {
+      this.autoStopTimer = null
       if (this.mode === 'test') this.beginFadeOut()
     }, durationMs)
   }
@@ -131,7 +152,7 @@ class AlarmEngine {
   /** Stops a test tone if one is playing; leaves a real alarm alone. */
   stopTest(): void {
     if (this.mode !== 'test') return
-    this.clearTestTimer()
+    this.clearAutoStop()
     this.beginFadeOut()
   }
 
@@ -235,7 +256,7 @@ class AlarmEngine {
 
   private finishStop(): void {
     this.stopTicker()
-    this.clearTestTimer()
+    this.clearAutoStop()
     this.fadingOut = false
     this.mode = 'idle'
     if (this.audio) {
@@ -294,16 +315,18 @@ class AlarmEngine {
 
   private targetVolume(): number {
     const base = Math.min(1, Math.max(0, this.volume / 100))
-    // Only the outage alarm escalates. A test should play at exactly the
-    // volume the user configured, or it isn't a test of that setting.
-    if (this.mode !== 'alarm') return base
+    // Escalation belongs to a continuous alarm, which has time to build.
+    // A single burst and a test both play at exactly the volume the user
+    // configured — starting a three-second alert at 30% would make the
+    // setting mean nothing.
+    if (this.mode !== 'alarm' || this.alarmMode !== 'continuous') return base
     return base * volumeFractionForElapsed(Date.now() - this.startedAt)
   }
 
-  private clearTestTimer(): void {
-    if (this.testTimer === null) return
-    clearTimeout(this.testTimer)
-    this.testTimer = null
+  private clearAutoStop(): void {
+    if (this.autoStopTimer === null) return
+    clearTimeout(this.autoStopTimer)
+    this.autoStopTimer = null
   }
 }
 

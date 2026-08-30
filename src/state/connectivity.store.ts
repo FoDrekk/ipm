@@ -30,6 +30,8 @@ export const useConnectivityStore = create<ConnectivityStore>((set) => ({
   offlineSince: null,
   statusChangedAt: null,
   isMonitoring: false,
+  latencyMs: null,
+  isSimulated: false,
 
   applyState: (state) => set(state),
 

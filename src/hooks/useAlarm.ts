@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { alarmEngine } from '../audio/alarmEngine'
+import type { AlarmMode } from '../ipc/ipc-client'
 import type { AlarmSound } from '../utils/alarmSounds'
 
 interface UseAlarmOptions {
@@ -11,6 +12,7 @@ interface UseAlarmOptions {
   /** 0-100. */
   volume: number
   sound: AlarmSound
+  mode: AlarmMode
 }
 
 /**
@@ -26,8 +28,14 @@ interface UseAlarmOptions {
  *  - one that pushes volume/sound changes into an already-running alarm.
  * If they were merged, every drag of the volume slider would tear the
  * alarm down and start it again.
+ *
+ * `mode` belongs to the first effect rather than the second: switching
+ * between continuous and once changes what the alarm *is*, and a once
+ * burst that has already finished has nothing left for an update to
+ * reach. Restarting is both correct and the audible confirmation that
+ * the new mode took.
  */
-export function useAlarm({ active, enabled, volume, sound }: UseAlarmOptions): void {
+export function useAlarm({ active, enabled, volume, sound, mode }: UseAlarmOptions): void {
   const shouldPlay = active && enabled
 
   // Read by the start effect, which must not re-run when the settings
@@ -38,11 +46,11 @@ export function useAlarm({ active, enabled, volume, sound }: UseAlarmOptions): v
 
   useEffect(() => {
     if (!shouldPlay) return
-    alarmEngine.startAlarm(latest.current.sound, latest.current.volume)
+    alarmEngine.startAlarm(latest.current.sound, latest.current.volume, mode)
     return () => {
       alarmEngine.stopAlarm()
     }
-  }, [shouldPlay])
+  }, [shouldPlay, mode])
 
   useEffect(() => {
     if (!shouldPlay) return

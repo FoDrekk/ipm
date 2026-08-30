@@ -26,6 +26,18 @@ interface MonitorServiceOptions {
 const DEFAULT_INTERVAL_MS = 10_000
 const MIN_SCHEDULE_MS = 500
 
+/** What one probe learned. The two timings answer different questions and
+ *  are deliberately not the same number: `totalMs` is how long the whole
+ *  request took including DNS and connection setup, which is what "the
+ *  connection feels slow" means and what the DEGRADED check uses;
+ *  `roundTripMs` is the server round-trip once connected, which is what
+ *  a latency reading should show. */
+interface ProbeOutcome {
+  ok: boolean
+  totalMs: number
+  roundTripMs: number | null
+}
+
 /**
  * Rotated one per probe rather than hammering a single host. A provider
  * outage, a poisoned DNS entry, or one CDN edge having a bad minute then
@@ -84,6 +96,8 @@ export class MonitorService {
   private offlineSince: number | null = null
   private statusChangedAt: number | null = null
   private reportedStatus: ConnectivityStatus = 'VERIFYING'
+  private latencyMs: number | null = null
+  private simulateOffline = false
 
   constructor(options: MonitorServiceOptions = {}) {
     this.intervalMs = options.intervalMs ?? DEFAULT_INTERVAL_MS
@@ -129,7 +143,31 @@ export class MonitorService {
       offlineSince: status === 'OFFLINE' ? toIso(this.offlineSince) : null,
       statusChangedAt: toIso(this.statusChangedAt),
       isMonitoring: this.running,
+      latencyMs: status === 'OFFLINE' ? null : this.latencyMs,
+      isSimulated: this.simulateOffline,
     }
+  }
+
+  /**
+   * Diagnostics: make every probe report failure without going near the
+   * network. Nothing about the state machine changes — the same streaks,
+   * thresholds, timings and transitions run — so the offline path being
+   * exercised is the real one, and turning it back off recovers through
+   * the real recovery path too.
+   *
+   * Deliberately in-memory only, and never persisted: a simulation that
+   * outlived a restart would be indistinguishable from a broken app.
+   */
+  setSimulatedOffline(enabled: boolean): void {
+    if (this.simulateOffline === enabled) return
+    this.simulateOffline = enabled
+    // Announce immediately so the UI can label the state as simulated
+    // before the next probe lands, rather than a beat later.
+    this.publish()
+  }
+
+  isSimulatingOffline(): boolean {
+    return this.simulateOffline
   }
 
   /** Applies new tunables to a monitor that may already be running. A
@@ -162,6 +200,7 @@ export class MonitorService {
     this.confirmed = null
     this.offlineSince = null
     this.lastInstabilityAt = null
+    this.latencyMs = null
     this.resetStreaks()
   }
 
@@ -201,27 +240,45 @@ export class MonitorService {
     const url = this.endpoints[this.endpointIndex % this.endpoints.length]
     this.endpointIndex = (this.endpointIndex + 1) % this.endpoints.length
     this.probeInFlight = true
-    const startedAt = Date.now()
 
-    this.probe(url, (succeeded) => {
+    const complete = (outcome: ProbeOutcome): void => {
       // A reply from a monitoring cycle that has since been stopped or
       // restarted must not touch current state, or schedule anything.
       if (runId !== this.runId) return
       this.probeInFlight = false
-      this.applyProbeResult(succeeded, Date.now() - startedAt)
+      this.applyProbeResult(outcome)
       this.scheduleNext()
-    })
+    }
+
+    if (this.simulateOffline) {
+      // Same code path as a real failure, minus the request.
+      complete({ ok: false, totalMs: 0, roundTripMs: null })
+      return
+    }
+
+    this.probe(url, complete)
   }
 
   // ---- network I/O -----------------------------------------------------
 
   /** One HTTPS probe. Never throws, and calls back exactly once. */
-  private probe(url: string, done: (succeeded: boolean) => void): void {
+  private probe(url: string, done: (outcome: ProbeOutcome) => void): void {
     let settled = false
-    const finish = (succeeded: boolean): void => {
+    const startedAt = Date.now()
+    // Set once the connection is up, so the round-trip can be measured
+    // without DNS and TLS setup in it. Stays null if those events can't
+    // be observed, in which case there is no round-trip figure to report
+    // rather than a misleadingly inflated one.
+    let connectedAt: number | null = null
+
+    const finish = (ok: boolean): void => {
       if (settled) return
       settled = true
-      done(succeeded)
+      done({
+        ok,
+        totalMs: Date.now() - startedAt,
+        roundTripMs: ok && connectedAt !== null ? Date.now() - connectedAt : null,
+      })
     }
 
     try {
@@ -244,6 +301,14 @@ export class MonitorService {
         }
       )
 
+      request.on('socket', (socket) => {
+        // A fresh socket every time (agent: false), so this fires before
+        // the handshake completes and the timestamp is meaningful.
+        socket.once('secureConnect', () => {
+          connectedAt = Date.now()
+        })
+      })
+
       request.on('timeout', () => {
         request.destroy(new Error(`Connectivity probe timed out: ${url}`))
       })
@@ -260,17 +325,20 @@ export class MonitorService {
 
   // ---- the verdict rule ------------------------------------------------
 
-  private applyProbeResult(succeeded: boolean, latencyMs: number): void {
+  private applyProbeResult(outcome: ProbeOutcome): void {
     const now = Date.now()
     this.lastChecked = now
 
-    if (succeeded) {
+    if (outcome.ok) {
       this.failureStreak = 0
       this.firstFailureAt = null
       this.successStreak += 1
+      // Reported for display only. It is read after the verdict below,
+      // never before it: latency has no say in whether we are online.
+      if (outcome.roundTripMs !== null) this.latencyMs = outcome.roundTripMs
       // A response this slow is a working connection behaving badly —
       // an unstable-network signal, not an outage.
-      if (latencyMs >= this.profile.slowResponseMs) this.lastInstabilityAt = now
+      if (outcome.totalMs >= this.profile.slowResponseMs) this.lastInstabilityAt = now
       this.applySuccess(now)
     } else {
       this.successStreak = 0

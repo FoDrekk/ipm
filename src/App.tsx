@@ -18,9 +18,10 @@ const OVERLAY_EXIT_MS = 200
  *  nothing to sound an alarm about anyway. Keeps the alarm hook's call
  *  unconditional without letting it make noise on a guess. */
 const SILENT_SETTINGS: AppSettings = {
-  alarm: { enabled: false, volume: 0, sound: 'classic-beep' },
+  alarm: { enabled: false, volume: 0, sound: 'classic-beep', mode: 'continuous' },
   notifications: { enabled: false, cooldownMs: 0 },
   monitoring: { intervalMs: 10_000, retryStrategy: 'normal' },
+  startup: { startMonitoring: false, startMinimized: false },
 }
 
 /**
@@ -44,6 +45,7 @@ export default function App() {
   const status = useConnectivityStore((state) => state.status)
   const isMonitoring = useConnectivityStore((state) => state.isMonitoring)
   const offlineSince = useConnectivityStore((state) => state.offlineSince)
+  const isSimulated = useConnectivityStore((state) => state.isSimulated)
 
   // Only alert while actively monitoring: a paused monitor's last known
   // status is history, not a live alarm condition.
@@ -83,6 +85,7 @@ export default function App() {
           onUpdateSettings={updateSettings}
           isSnoozed={isSnoozed}
           onSnooze={snooze}
+          isSimulated={isSimulated}
         />
       )}
     </>

@@ -21,7 +21,7 @@ function createHarness(options = {}) {
 
   const updates = []
   const probedUrls = []
-  let outcome = { ok: true, latencyMs: 10 }
+  let outcome = { ok: true, totalMs: 10, roundTripMs: 10 }
 
   const service = new MonitorService({
     intervalMs: INTERVAL,
@@ -33,16 +33,16 @@ function createHarness(options = {}) {
 
   service.probe = (url, done) => {
     probedUrls.push(url)
-    if (outcome.latencyMs > 0) mock.timers.tick(outcome.latencyMs)
-    done(outcome.ok)
+    if (outcome.totalMs > 0) mock.timers.tick(outcome.totalMs)
+    done({ ...outcome })
   }
 
   return {
     service,
     updates,
     probedUrls,
-    set: (ok, latencyMs = 10) => {
-      outcome = { ok, latencyMs }
+    set: (ok, totalMs = 10, roundTripMs = totalMs) => {
+      outcome = { ok, totalMs, roundTripMs: ok ? roundTripMs : null }
     },
     /** Advances time far enough for `count` more probes to run. */
     runProbes: (count) => {
@@ -241,7 +241,7 @@ describe('MonitorService', () => {
       assert.ok(deferred, 'a probe should be in flight')
 
       h.service.stop()
-      deferred(false) // the orphaned reply finally arrives
+      deferred({ ok: false, totalMs: 10, roundTripMs: null }) // the orphaned reply arrives
 
       assert.equal(h.service.getState().lastChecked, null, 'a stale reply must be ignored')
       assert.equal(h.service.getState().status, 'VERIFYING')
@@ -287,6 +287,100 @@ describe('MonitorService', () => {
       h.runProbes(1)
       const second = h.service.getState().lastChecked
       assert.ok(first && second && second > first, 'lastChecked must keep moving')
+    } finally {
+      h.cleanup()
+    }
+  })
+
+  test('reports latency from successful probes, and none while offline', () => {
+    const h = createHarness()
+    try {
+      h.set(true, 400, 42) // slow overall, but a 42ms round trip
+      h.service.start()
+      assert.equal(h.service.getState().latencyMs, 42)
+
+      // A failed probe carries no round trip, and the previous reading
+      // must not be presented as if it were current.
+      h.set(false)
+      h.runProbes(PROFILE.failureThreshold)
+      assert.equal(h.service.getState().status, 'OFFLINE')
+      assert.equal(h.service.getState().latencyMs, null)
+    } finally {
+      h.cleanup()
+    }
+  })
+
+  test('latency never influences the verdict', () => {
+    const h = createHarness()
+    try {
+      // Far above every threshold, but still a successful probe.
+      h.set(true, 10, 5_000)
+      h.service.start()
+      h.runProbes(5)
+      assert.notEqual(h.service.getState().status, 'OFFLINE')
+      assert.equal(h.service.getState().latencyMs, 5_000)
+    } finally {
+      h.cleanup()
+    }
+  })
+
+  test('a fresh cycle starts with no stale latency', () => {
+    const h = createHarness()
+    try {
+      h.service.start()
+      assert.equal(h.service.getState().latencyMs, 10)
+
+      h.service.stop()
+      h.service.start()
+      // start() probes immediately, so this is the new cycle's own
+      // reading, not the previous cycle's carried over.
+      assert.equal(h.service.getState().latencyMs, 10)
+      assert.equal(h.updates.filter((u) => u.state.latencyMs === null).length > 0, true)
+    } finally {
+      h.cleanup()
+    }
+  })
+
+  test('simulated offline drives the real state machine, and stops cleanly', () => {
+    const h = createHarness()
+    try {
+      h.service.start()
+      assert.equal(h.service.getState().status, 'ONLINE')
+
+      h.service.setSimulatedOffline(true)
+      assert.equal(h.service.getState().isSimulated, true)
+
+      const probesBefore = h.probedUrls.length
+      h.runProbes(PROFILE.failureThreshold)
+
+      const offline = h.service.getState()
+      assert.equal(offline.status, 'OFFLINE', 'the real threshold rule still applies')
+      assert.ok(offline.offlineSince !== null)
+      assert.equal(
+        h.probedUrls.length,
+        probesBefore,
+        'a simulated probe must not touch the network'
+      )
+
+      // Turning it off recovers through the real recovery path.
+      h.service.setSimulatedOffline(false)
+      h.runProbes(PROFILE.recoveryThreshold)
+      const recovered = h.service.getState()
+      assert.equal(recovered.status, 'ONLINE')
+      assert.equal(recovered.isSimulated, false)
+      assert.equal(recovered.offlineSince, null)
+    } finally {
+      h.cleanup()
+    }
+  })
+
+  test('toggling simulation to its current value changes nothing', () => {
+    const h = createHarness()
+    try {
+      h.service.start()
+      const updatesBefore = h.updates.length
+      h.service.setSimulatedOffline(false)
+      assert.equal(h.updates.length, updatesBefore, 'no redundant report')
     } finally {
       h.cleanup()
     }

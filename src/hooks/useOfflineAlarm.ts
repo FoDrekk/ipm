@@ -50,6 +50,7 @@ export function useOfflineAlarm(
     enabled: settings.alarm.enabled,
     volume: settings.alarm.volume,
     sound: settings.alarm.sound,
+    mode: settings.alarm.mode,
   })
 
   const snooze = useCallback(() => setSnoozedUntil(Date.now() + SNOOZE_MS), [])

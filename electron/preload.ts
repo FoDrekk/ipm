@@ -1,5 +1,11 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
-import type { AppApi, AppSettings, ConnectivityState, HistoryEvent } from './shared/types'
+import type {
+  AppApi,
+  AppSettings,
+  ConnectivityState,
+  ConnectivityStats,
+  HistoryEvent,
+} from './shared/types'
 
 /**
  * The entire surface the renderer can reach. Typed as AppApi — the same
@@ -43,6 +49,17 @@ const api: AppApi = {
 
   history: {
     get: (): Promise<HistoryEvent[]> => ipcRenderer.invoke('history:get'),
+  },
+
+  stats: {
+    get: (): Promise<ConnectivityStats> => ipcRenderer.invoke('stats:get'),
+  },
+
+  diagnostics: {
+    setSimulatedOffline: (enabled: boolean): Promise<ConnectivityState> =>
+      ipcRenderer.invoke('diagnostics:set-simulated-offline', enabled),
+    testNotification: (): Promise<boolean> => ipcRenderer.invoke('diagnostics:test-notification'),
+    testTray: (): Promise<boolean> => ipcRenderer.invoke('diagnostics:test-tray'),
   },
 }
 
