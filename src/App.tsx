@@ -7,6 +7,7 @@ import { useConnectivityBridge, useConnectivityStore } from './state/connectivit
 import Dashboard from './pages/Dashboard'
 import SettingsPanel from './pages/SettingsPanel'
 import OfflineOverlay from './components/OfflineOverlay'
+import { ErrorBoundary } from './components/ErrorBoundary'
 
 type View = 'dashboard' | 'settings'
 
@@ -67,14 +68,18 @@ export default function App() {
   return (
     <>
       {view === 'settings' ? (
-        <SettingsPanel
-          settings={settings}
-          onUpdate={updateSettings}
-          onBack={() => setView('dashboard')}
-          justSaved={justSaved}
-        />
+        <ErrorBoundary label="Settings" onRecover={() => setView('dashboard')}>
+          <SettingsPanel
+            settings={settings}
+            onUpdate={updateSettings}
+            onBack={() => setView('dashboard')}
+            justSaved={justSaved}
+          />
+        </ErrorBoundary>
       ) : (
-        <Dashboard onOpenSettings={() => setView('settings')} />
+        <ErrorBoundary label="Dashboard" onRecover={() => setView('dashboard')}>
+          <Dashboard onOpenSettings={() => setView('settings')} />
+        </ErrorBoundary>
       )}
 
       {showOverlay && (
