@@ -19,7 +19,7 @@ const CONTENT_SECURITY_POLICY = [
   "script-src 'self'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data:",
-  "media-src 'self' data:",
+  "media-src 'self' data: file: blob:",
   "font-src 'self' data:",
   "connect-src 'self'",
   "object-src 'none'",

@@ -103,6 +103,8 @@ export interface AppSettings {
     volume: number // 0-100
     sound: AlarmSound
     mode: AlarmMode
+    /** Absolute path to a user-picked audio file. Null = built-in sound. */
+    customSoundPath: string | null
   }
   notifications: {
     enabled: boolean
@@ -137,7 +139,7 @@ export interface HistoryEvent {
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
-  alarm: { enabled: true, volume: 70, sound: 'classic-beep', mode: 'continuous' },
+  alarm: { enabled: true, volume: 70, sound: 'classic-beep', mode: 'continuous', customSoundPath: null },
   notifications: { enabled: true, cooldownMs: 10_000 },
   monitoring: { intervalMs: 10_000, retryStrategy: 'normal' },
   startup: { startMonitoring: true, startMinimized: false },
@@ -250,6 +252,51 @@ export interface ConnectivityStats {
   longestOutageMs: number
 }
 
+// ---- statistics ranges --------------------------------------------------
+
+/** Stats window selector. `day` = current local day (legacy behavior). */
+export type StatsRange = 'day' | 'week' | 'month'
+
+export const STATS_RANGE_DAYS: Record<StatsRange, number> = {
+  day: 1,
+  week: 7,
+  month: 30,
+}
+
+export function statsRangeWindowStart(range: StatsRange, now: number): number {
+  if (range === 'day') {
+    const date = new Date(now)
+    date.setHours(0, 0, 0, 0)
+    return date.getTime()
+  }
+  const days = STATS_RANGE_DAYS[range]
+  const date = new Date(now)
+  date.setHours(0, 0, 0, 0)
+  return date.getTime() - (days - 1) * 24 * 60 * 60 * 1000
+}
+
+/** One day bucket for outage charts. */
+export interface DailyBucket {
+  /** ISO date (yyyy-mm-dd, local). */
+  date: string
+  onlineMs: number
+  degradedMs: number
+  offlineMs: number
+  outageCount: number
+}
+
+export interface LatencySample {
+  at: string
+  latencyMs: number
+}
+
+export interface UpdateStatus {
+  available: boolean
+  version: string | null
+  checking: boolean
+  error: string | null
+}
+
 // ---- the preload bridge ------------------------------------------------
 
 /**
@@ -272,14 +319,30 @@ export interface AppApi {
     /** Resolves with the setting actually in effect afterwards, which
      *  may differ from what was requested if the OS refused it. */
     setAutostart: (enabled: boolean) => Promise<boolean>
+    /** Opens a file picker for a custom alarm sound. Null if cancelled. */
+    pickAlarmFile: () => Promise<string | null>
   }
   history: {
     get: () => Promise<HistoryEvent[]>
+    /** CSV text of history, built in main so renderer stays thin. */
+    exportCsv: () => Promise<string>
   }
   stats: {
     /** Uptime/downtime for the current local day, computed in the main
      *  process from the same history the timeline is built from. */
-    get: () => Promise<ConnectivityStats>
+    get: (range?: StatsRange) => Promise<ConnectivityStats>
+    /** Per-day buckets for charts (7 or 30 entries). */
+    getDaily: (days?: number) => Promise<DailyBucket[]>
+  }
+  latency: {
+    get: () => Promise<LatencySample[]>
+  }
+  updater: {
+    check: () => Promise<UpdateStatus>
+    quitAndInstall: () => Promise<void>
+  }
+  logs: {
+    get: () => Promise<string>
   }
   diagnostics: {
     /** Forces the connectivity engine's probes to fail (or stops doing

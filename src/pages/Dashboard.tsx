@@ -1,13 +1,16 @@
+import { useState } from 'react'
 import { useConnectivityStore } from '../state/connectivity.store'
 import { useRelativeTime } from '../hooks/useRelativeTime'
 import { useOfflineDuration } from '../hooks/useOfflineDuration'
 import { useStats } from '../hooks/useStats'
+import type { StatsRange } from '../ipc/ipc-client'
 import StatusCard from '../components/StatusCard'
 import StatusIndicator from '../components/StatusIndicator'
 import ToggleSwitch from '../components/ToggleSwitch'
 import MiniStatusBadge from '../components/MiniStatusBadge'
 import LatencyReadout from '../components/LatencyReadout'
 import StatsStrip from '../components/StatsStrip'
+import OutageChart from '../components/OutageChart'
 import SimulationBanner from '../components/SimulationBanner'
 
 interface DashboardProps {
@@ -45,7 +48,8 @@ export default function Dashboard({ onOpenSettings }: DashboardProps) {
 
   const relativeTime = useRelativeTime(lastChecked)
   const lastCheckedLabel = lastChecked ? relativeTime : isMonitoring ? 'Checking…' : 'Not started'
-  const stats = useStats()
+  const [range, setRange] = useState<StatsRange>('day')
+  const stats = useStats(range)
   const currentOutage = useOfflineDuration(isMonitoring ? offlineSince : null)
 
   return (
@@ -81,7 +85,8 @@ export default function Dashboard({ onOpenSettings }: DashboardProps) {
         </StatusCard>
       </div>
 
-      <StatsStrip stats={stats} currentOutage={currentOutage} />
+      <OutageChart days={range === 'month' ? 30 : 7} />
+      <StatsStrip stats={stats} currentOutage={currentOutage} range={range} onRangeChange={setRange} />
     </div>
   )
 }

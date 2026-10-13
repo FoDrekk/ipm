@@ -5,8 +5,8 @@
 const { test, describe } = require('node:test')
 const assert = require('node:assert/strict')
 
-const { computeStats, startOfLocalDay, timelineStatusFor } = require('../dist-electron/shared/stats.js')
-const { formatDuration, latencyQuality } = require('../dist-electron/shared/types.js')
+const { computeStats, computeDailyBuckets, historyToCsv, startOfLocalDay, timelineStatusFor } = require('../dist-electron/shared/stats.js')
+const { formatDuration, latencyQuality, statsRangeWindowStart } = require('../dist-electron/shared/types.js')
 
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE
@@ -171,5 +171,38 @@ describe('latencyQuality', () => {
     assert.equal(latencyQuality(199), 'HIGH')
     assert.equal(latencyQuality(200), 'VERY_HIGH')
     assert.equal(latencyQuality(5_000), 'VERY_HIGH')
+  })
+})
+
+describe('stats ranges', () => {
+  test('week window starts 6 days before today', () => {
+    const now = Date.now()
+    const day = startOfLocalDay(now)
+    assert.equal(statsRangeWindowStart('day', now), day)
+    assert.equal(statsRangeWindowStart('week', now), day - 6 * 24 * 60 * 60 * 1000)
+    assert.equal(statsRangeWindowStart('month', now), day - 29 * 24 * 60 * 60 * 1000)
+  })
+
+  test('daily buckets split at midnight oldest-first', () => {
+    const now = startOfLocalDay(Date.now()) + 12 * HOUR
+    const dayStart = startOfLocalDay(now)
+    const events = [
+      { status: 'ONLINE', at: new Date(dayStart - 12 * HOUR).toISOString() },
+      { status: 'OFFLINE', at: new Date(dayStart + 2 * HOUR).toISOString() },
+      { status: 'ONLINE', at: new Date(dayStart + 3 * HOUR).toISOString() },
+    ]
+    const buckets = computeDailyBuckets(events, { now, days: 2, currentStatus: 'ONLINE' })
+    assert.equal(buckets.length, 2)
+    assert.equal(buckets[1].offlineMs, 1 * HOUR)
+    assert.equal(buckets[1].outageCount, 1)
+  })
+
+  test('historyToCsv emits header plus rows', () => {
+    const csv = historyToCsv([
+      { status: 'ONLINE', at: '2026-01-01T00:00:00.000Z' },
+      { status: 'OFFLINE', at: '2026-01-01T01:00:00.000Z' },
+    ])
+    assert.ok(csv.startsWith('status,at\n'))
+    assert.ok(csv.includes('OFFLINE,"2026-01-01T01:00:00.000Z"'))
   })
 })

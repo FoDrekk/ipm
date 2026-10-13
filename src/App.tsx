@@ -19,7 +19,7 @@ const OVERLAY_EXIT_MS = 200
  *  nothing to sound an alarm about anyway. Keeps the alarm hook's call
  *  unconditional without letting it make noise on a guess. */
 const SILENT_SETTINGS: AppSettings = {
-  alarm: { enabled: false, volume: 0, sound: 'classic-beep', mode: 'continuous' },
+  alarm: { enabled: false, volume: 0, sound: 'classic-beep', mode: 'continuous', customSoundPath: null },
   notifications: { enabled: false, cooldownMs: 0 },
   monitoring: { intervalMs: 10_000, retryStrategy: 'normal' },
   startup: { startMonitoring: false, startMinimized: false },

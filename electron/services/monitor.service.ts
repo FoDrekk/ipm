@@ -6,6 +6,7 @@ import type {
   RetryProfile,
 } from '../shared/types'
 import { RETRY_STRATEGY_PRESETS } from '../shared/types'
+import { logger } from './logger.service'
 
 export type { ConfirmedStatus, ConnectivityState, ConnectivityStatus }
 
@@ -37,6 +38,8 @@ interface ProbeOutcome {
   totalMs: number
   roundTripMs: number | null
 }
+
+const MAX_LATENCY_SAMPLES = 120
 
 /**
  * Rotated one per probe rather than hammering a single host. A provider
@@ -97,6 +100,7 @@ export class MonitorService {
   private statusChangedAt: number | null = null
   private reportedStatus: ConnectivityStatus = 'VERIFYING'
   private latencyMs: number | null = null
+  private latencyHistory: { at: string; latencyMs: number }[] = []
   private simulateOffline = false
 
   constructor(options: MonitorServiceOptions = {}) {
@@ -146,6 +150,10 @@ export class MonitorService {
       latencyMs: status === 'OFFLINE' ? null : this.latencyMs,
       isSimulated: this.simulateOffline,
     }
+  }
+
+  getLatencyHistory(): { at: string; latencyMs: number }[] {
+    return [...this.latencyHistory]
   }
 
   /**
@@ -201,6 +209,7 @@ export class MonitorService {
     this.offlineSince = null
     this.lastInstabilityAt = null
     this.latencyMs = null
+    this.latencyHistory = []
     this.resetStreaks()
   }
 
@@ -335,7 +344,13 @@ export class MonitorService {
       this.successStreak += 1
       // Reported for display only. It is read after the verdict below,
       // never before it: latency has no say in whether we are online.
-      if (outcome.roundTripMs !== null) this.latencyMs = outcome.roundTripMs
+      if (outcome.roundTripMs !== null) {
+        this.latencyMs = outcome.roundTripMs
+        this.latencyHistory.push({ at: new Date(now).toISOString(), latencyMs: outcome.roundTripMs })
+        if (this.latencyHistory.length > MAX_LATENCY_SAMPLES) {
+          this.latencyHistory.splice(0, this.latencyHistory.length - MAX_LATENCY_SAMPLES)
+        }
+      }
       // A response this slow is a working connection behaving badly —
       // an unstable-network signal, not an outage.
       if (outcome.totalMs >= this.profile.slowResponseMs) this.lastInstabilityAt = now
@@ -420,7 +435,7 @@ export class MonitorService {
     try {
       this.onUpdate?.(this.getState(), statusChanged)
     } catch (error) {
-      console.error('[MonitorService] update listener threw:', error)
+      logger.error('[MonitorService] update listener threw:', error)
     }
   }
 }

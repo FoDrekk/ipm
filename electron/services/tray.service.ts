@@ -1,5 +1,6 @@
 import { Tray, Menu, nativeImage, app, type NativeImage } from 'electron'
 import path from 'node:path'
+import { logger } from './logger.service'
 import type { ConnectivityState, ConnectivityStatus } from '../shared/types'
 
 interface TrayServiceOptions {
@@ -81,7 +82,7 @@ export class TrayService {
       // A tray that won't initialise (missing icon file, no system tray)
       // is a degraded experience, not a reason to fail startup — the
       // window and monitoring work regardless.
-      console.error('[TrayService] Failed to create tray icon:', error)
+      logger.error('[TrayService] Failed to create tray icon:', error)
       this.tray = null
     }
   }
@@ -178,7 +179,7 @@ export class TrayService {
 
     const image = nativeImage.createFromPath(path.join(TRAY_ICONS_DIR, ICON_FILES[state]))
     if (image.isEmpty()) {
-      console.warn(`[TrayService] Tray icon not found or unreadable: ${ICON_FILES[state]}`)
+      logger.warn(`[TrayService] Tray icon not found or unreadable: ${ICON_FILES[state]}`)
     }
     this.iconCache.set(state, image)
     return image

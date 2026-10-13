@@ -1,6 +1,7 @@
 import { app } from 'electron'
 import path from 'node:path'
 import fs from 'node:fs'
+import { logger } from './logger.service'
 import {
   DEFAULT_SETTINGS,
   mergeSettings,
@@ -30,14 +31,13 @@ interface PersistedData {
 }
 
 const FILE_NAME = 'app-data.json'
+const BACKUP_COUNT = 3
 
-// The timeline is what uptime statistics are computed from, so it has to
-// be long enough to cover the day being reported on — twenty entries was
-// plenty for a "recent activity" list and nowhere near enough for that.
-// Bounded by both count and age so a badly flapping connection can't grow
+// The timeline backs 30-day stats + charts, so retention covers a full
+// month plus margin. Bounded by count and age so flapping cannot grow
 // the file without limit.
-const MAX_HISTORY = 500
-const HISTORY_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000
+const MAX_HISTORY = 2000
+const HISTORY_RETENTION_MS = 32 * 24 * 60 * 60 * 1_000
 
 function isAlarmSound(value: unknown): value is AlarmSound {
   return value === 'classic-beep' || value === 'gentle-chime' || value === 'urgent-siren'
@@ -91,6 +91,10 @@ function validateSettings(raw: unknown): AppSettings {
       volume: clampedNumberOrDefault(alarm.volume, 0, 100, DEFAULT_SETTINGS.alarm.volume),
       sound: isAlarmSound(alarm.sound) ? alarm.sound : DEFAULT_SETTINGS.alarm.sound,
       mode: isAlarmMode(alarm.mode) ? alarm.mode : DEFAULT_SETTINGS.alarm.mode,
+      customSoundPath:
+        typeof alarm.customSoundPath === 'string' && alarm.customSoundPath.length > 0
+          ? alarm.customSoundPath.slice(0, 1024)
+          : null,
     },
     notifications: {
       enabled:
@@ -136,6 +140,7 @@ function validateSettings(raw: unknown): AppSettings {
     wasCorrected(alarm.volume, validated.alarm.volume) ||
     wasCorrected(alarm.sound, validated.alarm.sound) ||
     wasCorrected(alarm.mode, validated.alarm.mode) ||
+    wasCorrected(alarm.customSoundPath, validated.alarm.customSoundPath) ||
     wasCorrected(notifications.enabled, validated.notifications.enabled) ||
     wasCorrected(notifications.cooldownMs, validated.notifications.cooldownMs) ||
     wasCorrected(monitoring.intervalMs, validated.monitoring.intervalMs) ||
@@ -144,7 +149,7 @@ function validateSettings(raw: unknown): AppSettings {
     wasCorrected(startup.startMinimized, validated.startup.startMinimized)
 
   if (corrected) {
-    console.warn(
+    logger.warn(
       '[StorageService] One or more settings values were invalid or out of range — corrected to safe defaults/bounds.'
     )
   }
@@ -186,6 +191,7 @@ function validateHistory(raw: unknown, now: number): HistoryEvent[] {
  */
 export class StorageService {
   private data: PersistedData
+  private lastBackupAt = 0
 
   constructor() {
     this.data = this.load()
@@ -245,40 +251,49 @@ export class StorageService {
   }
 
   private load(): PersistedData {
-    try {
-      const raw = fs.readFileSync(this.filePath(), 'utf-8')
-      const parsed: unknown = JSON.parse(raw)
-      const record = isRecord(parsed) ? parsed : {}
+    const primary = this.filePath()
+    const candidates = [primary]
+    for (let i = 1; i <= BACKUP_COUNT; i++) candidates.push(`${primary}.bak.${i}`)
+    for (const candidate of candidates) {
+      let raw: string | null = null
+      try {
+        raw = fs.readFileSync(candidate, 'utf-8')
+      } catch (error) {
+        const isMissing = (error as NodeJS.ErrnoException)?.code === 'ENOENT'
+        if (!isMissing) logger.warn(`[StorageService] Backup unreadable (${candidate}):`, error)
+        continue
+      }
+      try {
+        const parsed: unknown = JSON.parse(raw)
+        const record = isRecord(parsed) ? parsed : {}
+        if (candidate !== primary) logger.warn(`[StorageService] Recovered data from backup: ${candidate}`)
 
-      // SCHEMA_VERSION tracks AppSettings' shape specifically (see its
-      // definition above) — a mismatch resets settings only, not
-      // history, which isn't what this version describes. A missing
-      // version (a file from before the field existed) counts as a
-      // mismatch: there's nothing to compare against.
+        // SCHEMA_VERSION tracks AppSettings' shape specifically (see its
+        // definition above) — a mismatch resets settings only, not
+        // history, which isn't what this version describes. A missing
+        // version (a file from before the field existed) counts as a
+        // mismatch: there's nothing to compare against.
       const versionMatches = record.version === SCHEMA_VERSION
       if (!versionMatches) {
-        console.warn(
+        logger.warn(
           `[StorageService] Settings schema version mismatch (file: ${
             typeof record.version === 'number' ? record.version : 'none'
           }, expected: ${SCHEMA_VERSION}) — resetting settings to defaults.`
         )
       }
 
-      return {
-        version: SCHEMA_VERSION,
-        settings: versionMatches ? validateSettings(record.settings) : DEFAULT_SETTINGS,
-        history: this.closeUnfinishedSession(validateHistory(record.history, Date.now())),
+        return {
+          version: SCHEMA_VERSION,
+          settings: versionMatches ? validateSettings(record.settings) : DEFAULT_SETTINGS,
+          history: this.closeUnfinishedSession(validateHistory(record.history, Date.now())),
+        }
+      } catch {
+        // Corrupt candidate — try next backup instead of discarding all.
+        logger.warn(`[StorageService] Data file corrupt, trying next backup: ${candidate}`)
+        continue
       }
-    } catch (error) {
-      // ENOENT (no file yet) is the normal first-launch case, not a
-      // problem worth a warning. Anything else — unreadable, not valid
-      // JSON, permissions — is a genuine corrupted-file case.
-      const isMissingFile = (error as NodeJS.ErrnoException)?.code === 'ENOENT'
-      if (!isMissingFile) {
-        console.warn('[StorageService] Data file unreadable, falling back to defaults:', error)
-      }
-      return { version: SCHEMA_VERSION, settings: DEFAULT_SETTINGS, history: [] }
     }
+    return { version: SCHEMA_VERSION, settings: DEFAULT_SETTINGS, history: [] }
   }
 
   private save(): void {
@@ -290,16 +305,42 @@ export class StorageService {
       // leave a truncated/corrupt JSON file behind.
       fs.writeFileSync(tmpPath, JSON.stringify(this.data, null, 2), 'utf-8')
       fs.renameSync(tmpPath, target)
+      this.rotateBackups(target)
     } catch (error) {
       // A failed save is not fatal — the in-memory copy stays correct
       // for this session, so the app keeps working with the user's
       // choices; only persistence across restarts is lost.
-      console.error('[StorageService] Failed to save app data:', error)
+      logger.error('[StorageService] Failed to save app data:', error)
       try {
         fs.rmSync(tmpPath, { force: true })
       } catch {
         // Nothing more to do; a stray .tmp file is harmless.
       }
+    }
+  }
+
+  /**
+   * Keeps BACKUP_COUNT rolling copies after every successful save.
+   * Cheap insurance: each copy is a few KB. Best-effort — a failure
+   * here never fails the save itself. Throttled to once per 5s so
+   * rapid saves (volume drag) keep atomic writes without copy storms.
+   */
+  private rotateBackups(target: string): void {
+    const now = Date.now()
+    if (now - this.lastBackupAt < 5_000) return
+    this.lastBackupAt = now
+    try {
+      for (let i = BACKUP_COUNT; i >= 1; i--) {
+        const src = i === 1 ? target : `${target}.bak.${i - 1}`
+        const dest = `${target}.bak.${i}`
+        try {
+          fs.copyFileSync(src, dest)
+        } catch {
+          // Missing predecessor on first runs — nothing to rotate yet.
+        }
+      }
+    } catch {
+      // Backups are best-effort only.
     }
   }
 }
