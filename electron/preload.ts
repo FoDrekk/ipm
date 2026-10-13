@@ -4,7 +4,11 @@ import type {
   AppSettings,
   ConnectivityState,
   ConnectivityStats,
+  DailyBucket,
   HistoryEvent,
+  LatencySample,
+  StatsRange,
+  UpdateStatus,
 } from './shared/types'
 
 /**
@@ -45,14 +49,30 @@ const api: AppApi = {
     getAutostart: (): Promise<boolean> => ipcRenderer.invoke('settings:get-autostart'),
     setAutostart: (enabled: boolean): Promise<boolean> =>
       ipcRenderer.invoke('settings:set-autostart', enabled),
+    pickAlarmFile: (): Promise<string | null> => ipcRenderer.invoke('settings:pick-alarm-file'),
   },
 
   history: {
     get: (): Promise<HistoryEvent[]> => ipcRenderer.invoke('history:get'),
+    exportCsv: (): Promise<string> => ipcRenderer.invoke('history:export-csv'),
   },
 
   stats: {
-    get: (): Promise<ConnectivityStats> => ipcRenderer.invoke('stats:get'),
+    get: (range?: StatsRange): Promise<ConnectivityStats> => ipcRenderer.invoke('stats:get', range),
+    getDaily: (days?: number): Promise<DailyBucket[]> => ipcRenderer.invoke('stats:get-daily', days),
+  },
+
+  latency: {
+    get: (): Promise<LatencySample[]> => ipcRenderer.invoke('latency:get'),
+  },
+
+  updater: {
+    check: (): Promise<UpdateStatus> => ipcRenderer.invoke('updater:check'),
+    quitAndInstall: (): Promise<void> => ipcRenderer.invoke('updater:quit-and-install'),
+  },
+
+  logs: {
+    get: (): Promise<string> => ipcRenderer.invoke('logs:get'),
   },
 
   diagnostics: {

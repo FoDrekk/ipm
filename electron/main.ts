@@ -1,17 +1,30 @@
-import { app, BrowserWindow, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import path from 'node:path'
 import { MonitorService } from './services/monitor.service'
 import { TrayService } from './services/tray.service'
 import { NotificationService } from './services/notification.service'
 import { StorageService } from './services/storage.service'
+import { logger } from './services/logger.service'
+import { UpdaterService } from './services/updater.service'
 import {
   RETRY_STRATEGY_PRESETS,
+  statsRangeWindowStart,
   type AppSettings,
   type ConnectivityState,
   type ConnectivityStats,
+  type DailyBucket,
   type HistoryEvent,
+  type LatencySample,
+  type StatsRange,
+  type UpdateStatus,
 } from './shared/types'
-import { computeStats, startOfLocalDay, timelineStatusFor } from './shared/stats'
+import {
+  computeDailyBuckets,
+  computeStats,
+  historyToCsv,
+  startOfLocalDay,
+  timelineStatusFor,
+} from './shared/stats'
 
 const isDev = process.env.NODE_ENV === 'development'
 const DEV_SERVER_URL = 'http://localhost:5173'
@@ -78,6 +91,8 @@ function bootstrap(): void {
     enabled: initialSettings.notifications.enabled,
     cooldownMs: initialSettings.notifications.cooldownMs,
   })
+
+  const updaterService = new UpdaterService()
 
   const monitorService = new MonitorService({
     intervalMs: initialSettings.monitoring.intervalMs,
@@ -169,7 +184,7 @@ function bootstrap(): void {
     // tray and notifications all live here in the main process and keep
     // running. The window is rebuilt so the dashboard comes back.
     window.webContents.on('render-process-gone', (_event, details) => {
-      console.error('[main] Renderer process gone:', details.reason)
+      logger.error('[main] Renderer process gone:', details.reason)
       if (!isQuitting) {
         mainWindow = null
         window.destroy()
@@ -305,7 +320,7 @@ function bootstrap(): void {
     try {
       app.setLoginItemSettings({ openAtLogin: enabled })
     } catch (error) {
-      console.error('[main] Failed to change the launch-at-login setting:', error)
+      logger.error('[main] Failed to change the launch-at-login setting:', error)
     }
     // Reports what is actually in effect, not what was asked for, so a
     // refusal by the OS shows up in the UI as the toggle staying put.
@@ -314,17 +329,56 @@ function bootstrap(): void {
 
   ipcMain.handle('history:get', (): HistoryEvent[] => storageService.getHistory())
 
-  ipcMain.handle('stats:get', (): ConnectivityStats => {
+  ipcMain.handle('history:export-csv', (): string => historyToCsv(storageService.getHistory()))
+
+  ipcMain.handle('stats:get', (_event, range: unknown): ConnectivityStats => {
     const now = Date.now()
     const state = monitorService.getState()
+    const parsed: StatsRange = range === 'week' || range === 'month' ? range : 'day'
+    const windowStart =
+      parsed === 'day' ? startOfLocalDay(now) : statsRangeWindowStart(parsed, now)
     return computeStats(storageService.getHistory(), {
       now,
-      windowStart: startOfLocalDay(now),
+      windowStart,
       // The timeline's open final segment belongs to what is happening
       // now, which is fresher than the last recorded transition.
       currentStatus: timelineStatusFor(state.status, state.isMonitoring),
     })
   })
+
+  ipcMain.handle('stats:get-daily', (_event, days: unknown): DailyBucket[] => {
+    const now = Date.now()
+    const state = monitorService.getState()
+    const n = typeof days === 'number' && Number.isFinite(days) ? Math.min(30, Math.max(2, Math.floor(days))) : 7
+    return computeDailyBuckets(storageService.getHistory(), {
+      now,
+      days: n,
+      currentStatus: timelineStatusFor(state.status, state.isMonitoring),
+    })
+  })
+
+  ipcMain.handle('latency:get', (): LatencySample[] => monitorService.getLatencyHistory())
+
+  ipcMain.handle('settings:pick-alarm-file', async (): Promise<string | null> => {
+    try {
+      const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined
+      const result = await dialog.showOpenDialog(parent as never, {
+        properties: ['openFile'],
+        filters: [{ name: 'Audio', extensions: ['mp3', 'wav', 'ogg', 'm4a'] }],
+      })
+      if (result.canceled || result.filePaths.length === 0) return null
+      return result.filePaths[0] ?? null
+    } catch (error) {
+      logger.warn('[main] pick-alarm-file failed:', error)
+      return null
+    }
+  })
+
+  ipcMain.handle('updater:check', (): Promise<UpdateStatus> => updaterService.check())
+
+  ipcMain.handle('updater:quit-and-install', (): void => updaterService.quitAndInstall())
+
+  ipcMain.handle('logs:get', (): string => logger.readTail())
 
   // ---- diagnostics -----------------------------------------------------
 
@@ -341,7 +395,7 @@ function bootstrap(): void {
     try {
       return app.getLoginItemSettings().openAtLogin
     } catch (error) {
-      console.error('[main] Failed to read the launch-at-login setting:', error)
+      logger.error('[main] Failed to read the launch-at-login setting:', error)
       return false
     }
   }
@@ -385,10 +439,16 @@ function bootstrap(): void {
     startHidden = initialSettings.startup.startMinimized
     showWindow()
     trayService.init()
+    logger.info('[main] App ready.')
 
     // Off by choice means paused, not broken: the dashboard toggle and
     // the tray menu both still start it, and the tray shows the paused
     // state so it never looks like monitoring silently failed.
     if (initialSettings.startup.startMonitoring) monitorService.start()
+
+    // Best-effort update check shortly after launch. Failures only log.
+    setTimeout(() => {
+      void updaterService.check().catch((error: unknown) => logger.warn('[main] Update check failed:', error))
+    }, 15000)
   })
 }

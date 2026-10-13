@@ -13,6 +13,95 @@ export function startOfLocalDay(at: number): number {
   return date.getTime()
 }
 
+/** Start of local day N days ago (0 = today). */
+export function startOfLocalDayOffset(at: number, daysAgo: number): number {
+  const base = startOfLocalDay(at)
+  return base - daysAgo * 24 * 60 * 60 * 1000
+}
+
+function localDateKey(at: number): string {
+  const d = new Date(at)
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+/**
+ * Per-day buckets for charts. Splits every timeline segment at local
+ * midnight so multi-day outages attribute correctly. Returns oldest-first.
+ */
+export function computeDailyBuckets(
+  events: readonly HistoryEvent[],
+  options: { now: number; days: number; currentStatus: HistoryStatus | null }
+): import('./types').DailyBucket[] {
+  const { now, days, currentStatus } = options
+  const ordered = events
+    .map((event) => ({ status: event.status, at: Date.parse(event.at) }))
+    .filter((event) => Number.isFinite(event.at))
+    .sort((a, b) => a.at - b.at)
+
+  const segments: Segment[] = []
+  for (let i = 0; i < ordered.length; i++) {
+    const entry = ordered[i]
+    const next = ordered[i + 1]
+    segments.push({ status: entry.status, from: entry.at, to: next ? next.at : now })
+  }
+  const last = segments[segments.length - 1]
+  if (last && currentStatus !== null) last.status = currentStatus
+
+  const DAY_MS = 24 * 60 * 60 * 1000
+  const todayStart = startOfLocalDay(now)
+  const buckets = new Map<string, import('./types').DailyBucket>()
+  for (let d = days - 1; d >= 0; d--) {
+    const dayStart = todayStart - d * DAY_MS
+    buckets.set(localDateKey(dayStart), {
+      date: localDateKey(dayStart),
+      onlineMs: 0,
+      degradedMs: 0,
+      offlineMs: 0,
+      outageCount: 0,
+    })
+  }
+
+  for (const seg of segments) {
+    let cursor = Math.max(seg.from, todayStart - (days - 1) * DAY_MS)
+    const end = Math.min(seg.to, now)
+    if (end <= cursor) continue
+    // Walk across midnight boundaries.
+    while (cursor < end) {
+      const dayStart = startOfLocalDay(cursor)
+      const dayEnd = Math.min(dayStart + DAY_MS, end)
+      const key = localDateKey(cursor)
+      const bucket = buckets.get(key)
+      if (bucket) {
+        const ms = dayEnd - cursor
+        if (seg.status === 'ONLINE') bucket.onlineMs += ms
+        else if (seg.status === 'DEGRADED') bucket.degradedMs += ms
+        else if (seg.status === 'OFFLINE') {
+          // One count per segment per day it touches. Gating on
+          // `offlineMs === 0` undercounted two outages sharing a day.
+          bucket.outageCount += 1
+          bucket.offlineMs += ms
+        }
+      }
+      cursor = dayEnd
+    }
+  }
+  return [...buckets.values()]
+}
+
+/** CSV export of history, newest-first. Pure so renderer/tests reuse it. */
+export function historyToCsv(events: readonly HistoryEvent[]): string {
+  const lines = ['status,at']
+  for (const e of events) {
+    const status = String(e.status).replace(/[^A-Z]/g, '')
+    const at = String(e.at).replace(/"/g, '')
+    lines.push(`${status},"${at}"`)
+  }
+  return lines.join('\n') + '\n'
+}
+
 /**
  * Turns the timeline into per-status totals for [windowStart, now].
  *

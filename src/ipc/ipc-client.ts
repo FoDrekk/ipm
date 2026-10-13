@@ -5,9 +5,13 @@ import type {
   ConnectivityState,
   ConnectivityStats,
   ConnectivityStatus,
+  DailyBucket,
   HistoryEvent,
   HistoryStatus,
+  LatencySample,
   RetryStrategy,
+  StatsRange,
+  UpdateStatus,
 } from '../../electron/shared/types'
 
 export type {
@@ -16,9 +20,13 @@ export type {
   ConnectivityState,
   ConnectivityStats,
   ConnectivityStatus,
+  DailyBucket,
   HistoryEvent,
   HistoryStatus,
+  LatencySample,
   RetryStrategy,
+  StatsRange,
+  UpdateStatus,
 }
 
 declare global {
@@ -82,8 +90,36 @@ export function getHistory(): Promise<HistoryEvent[]> {
   return bridge().history.get()
 }
 
-export function getStats(): Promise<ConnectivityStats> {
-  return bridge().stats.get()
+export function exportHistoryCsv(): Promise<string> {
+  return bridge().history.exportCsv()
+}
+
+export function getStats(range?: StatsRange): Promise<ConnectivityStats> {
+  return bridge().stats.get(range)
+}
+
+export function getDailyStats(days?: number): Promise<DailyBucket[]> {
+  return bridge().stats.getDaily(days)
+}
+
+export function getLatency(): Promise<LatencySample[]> {
+  return bridge().latency.get()
+}
+
+export function pickAlarmFile(): Promise<string | null> {
+  return bridge().settings.pickAlarmFile()
+}
+
+export function checkForUpdates(): Promise<UpdateStatus> {
+  return bridge().updater.check()
+}
+
+export function quitAndInstall(): Promise<void> {
+  return bridge().updater.quitAndInstall()
+}
+
+export function getLogs(): Promise<string> {
+  return bridge().logs.get()
 }
 
 export function setSimulatedOffline(enabled: boolean): Promise<ConnectivityState> {

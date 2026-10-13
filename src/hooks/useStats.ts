@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { getStats, type ConnectivityStats } from '../ipc/ipc-client'
+import { getStats, type ConnectivityStats, type StatsRange } from '../ipc/ipc-client'
 import { useConnectivityStore } from '../state/connectivity.store'
 
 // Slow on purpose. The numbers move continuously, but they are summaries
@@ -8,12 +8,12 @@ import { useConnectivityStore } from '../state/connectivity.store'
 const REFRESH_MS = 30_000
 
 /**
- * Today's uptime/downtime figures, computed in the main process from the
- * same history the timeline is built from. Refetched on a slow timer and
- * whenever the connectivity status changes, because a transition is
- * exactly what makes the previous answer stale.
+ * Uptime/downtime figures for given range, computed in main process from
+ * same history timeline is built from. Refetched on slow timer and
+ * whenever connectivity status changes, because transition is exactly
+ * what makes previous answer stale.
  */
-export function useStats(): ConnectivityStats | null {
+export function useStats(range: StatsRange = 'day'): ConnectivityStats | null {
   const [stats, setStats] = useState<ConnectivityStats | null>(null)
   const mountedRef = useRef(true)
 
@@ -23,14 +23,14 @@ export function useStats(): ConnectivityStats | null {
   const isMonitoring = useConnectivityStore((state) => state.isMonitoring)
 
   const refresh = useCallback(() => {
-    getStats()
+    getStats(range)
       .then((next) => {
         if (mountedRef.current) setStats(next)
       })
       .catch((error: unknown) => {
         console.error('[stats] failed to load statistics:', error)
       })
-  }, [])
+  }, [range])
 
   useEffect(() => {
     mountedRef.current = true

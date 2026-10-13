@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import type { AlarmMode, AppSettings, HistoryEvent, RetryStrategy } from '../ipc/ipc-client'
-import { getHistory } from '../ipc/ipc-client'
+import { checkForUpdates, exportHistoryCsv, getHistory, getLogs, pickAlarmFile, quitAndInstall } from '../ipc/ipc-client'
 import { ALARM_SOUND_OPTIONS, type AlarmSound } from '../utils/alarmSounds'
 import { alarmEngine } from '../audio/alarmEngine'
 import { useConnectivityStore } from '../state/connectivity.store'
@@ -95,6 +95,9 @@ function DiagnosticButton({
 
 export default function SettingsPanel({ settings, onUpdate, onBack, justSaved }: SettingsPanelProps) {
   const [history, setHistory] = useState<HistoryEvent[]>([])
+  const [updateStatus, setUpdateStatus] = useState<string | null>(null)
+  const [updateAvailable, setUpdateAvailable] = useState(false)
+  const [logTail, setLogTail] = useState<string | null>(null)
   const { enabled: autostart, setEnabled: setAutostart } = useAutostart()
 
   // The engine refuses a test while the outage alarm is sounding — one
@@ -133,7 +136,7 @@ export default function SettingsPanel({ settings, onUpdate, onBack, justSaved }:
   }, [])
 
   function handleTestAlarm(): void {
-    alarmEngine.playTest(settings.alarm.sound, settings.alarm.volume, TEST_ALARM_DURATION_MS)
+    alarmEngine.playTest(settings.alarm.sound, settings.alarm.volume, TEST_ALARM_DURATION_MS, settings.alarm.customSoundPath)
   }
 
   return (
@@ -182,6 +185,36 @@ export default function SettingsPanel({ settings, onUpdate, onBack, justSaved }:
                 value={settings.alarm.mode}
                 onChange={(mode: AlarmMode) => onUpdate({ alarm: { ...settings.alarm, mode } })}
               />
+            </div>
+            <div>
+              <FieldLabel description="Optional file overrides built-in tone">Custom sound</FieldLabel>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    pickAlarmFile()
+                      .then((file) => {
+                        if (file) onUpdate({ alarm: { ...settings.alarm, customSoundPath: file } })
+                      })
+                      .catch(() => undefined)
+                  }}
+                  className="rounded-lg bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 active:scale-95"
+                >
+                  Choose file
+                </button>
+                {settings.alarm.customSoundPath && (
+                  <button
+                    type="button"
+                    onClick={() => onUpdate({ alarm: { ...settings.alarm, customSoundPath: null } })}
+                    className="rounded-lg px-2 py-1.5 text-xs text-slate-500 hover:text-slate-300"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+              {settings.alarm.customSoundPath && (
+                <p className="mt-1 truncate text-[11px] text-slate-500">{settings.alarm.customSoundPath}</p>
+              )}
             </div>
             <button
               type="button"
@@ -312,7 +345,92 @@ export default function SettingsPanel({ settings, onUpdate, onBack, justSaved }:
             </div>
           </Section>
 
+          <Section title="Updates & Logs">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  checkForUpdates()
+                    .then((s) => {
+                      setUpdateStatus(s.available ? `Available: ${s.version ?? 'new'}` : s.error ?? 'Up to date')
+                      setUpdateAvailable(s.available)
+                    })
+                    .catch(() => setUpdateStatus('Check failed'))
+                }}
+                className="rounded-lg bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 active:scale-95"
+              >
+                Check updates
+              </button>
+              {updateAvailable && (
+                <button
+                  type="button"
+                  onClick={() => quitAndInstall().catch(() => undefined)}
+                  className="rounded-lg bg-emerald-500/20 px-3 py-1.5 text-xs font-medium text-emerald-300 hover:bg-emerald-500/30 active:scale-95"
+                >
+                  Restart to update
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  getLogs()
+                    .then((text) => setLogTail(text.slice(-2000) || 'Log empty'))
+                    .catch(() => setLogTail('Log unavailable'))
+                }}
+                className="rounded-lg bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 active:scale-95"
+              >
+                View logs
+              </button>
+            </div>
+            {(updateStatus || logTail) && (
+              <div className="flex flex-col gap-1">
+                {updateStatus && <p className="text-[11px] text-slate-500">{updateStatus}</p>}
+                {logTail && <pre className="max-h-28 overflow-y-auto whitespace-pre-wrap rounded bg-slate-950/60 p-2 text-[10px] text-slate-500">{logTail}</pre>}
+              </div>
+            )}
+          </Section>
+
           <Section title="Recent Activity">
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  exportHistoryCsv()
+                    .then((csv) => {
+                      const blob = new Blob([csv], { type: 'text/csv' })
+                      const url = URL.createObjectURL(blob)
+                      const a = document.createElement('a')
+                      a.href = url
+                      a.download = 'internet-monitor-history.csv'
+                      document.body.appendChild(a)
+                      a.click()
+                      a.remove()
+                      setTimeout(() => URL.revokeObjectURL(url), 1000)
+                    })
+                    .catch(() => undefined)
+                }}
+                className="rounded-lg bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 active:scale-95"
+              >
+                Export CSV
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const blob = new Blob([JSON.stringify(history, null, 2)], { type: 'application/json' })
+                  const url = URL.createObjectURL(blob)
+                  const a = document.createElement('a')
+                  a.href = url
+                  a.download = 'internet-monitor-history.json'
+                  document.body.appendChild(a)
+                  a.click()
+                  a.remove()
+                  setTimeout(() => URL.revokeObjectURL(url), 1000)
+                }}
+                className="rounded-lg bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 active:scale-95"
+              >
+                Export JSON
+              </button>
+            </div>
             <HistoryList events={history} />
           </Section>
         </div>

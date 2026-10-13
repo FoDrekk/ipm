@@ -1,5 +1,6 @@
 import { Notification } from 'electron'
 import { formatDuration, type ConnectivityState, type ConnectivityStatus } from '../shared/types'
+import { logger } from './logger.service'
 
 const APP_NAME = 'Internet Monitor Pro'
 const DEFAULT_COOLDOWN_MS = 10_000
@@ -121,7 +122,7 @@ export class NotificationService {
     } catch (error) {
       // A notification that can't be shown (no toast support, a locked
       // session, group policy) is never a reason to take the app down.
-      console.warn('[NotificationService] Failed to show notification:', error)
+      logger.warn('[NotificationService] Failed to show notification:', error)
       return false
     }
   }

@@ -1,6 +1,13 @@
 import { ONCE_ALARM_DURATION_MS, type AlarmMode } from '../../electron/shared/types'
 import { ALARM_SOUND_SOURCES, type AlarmSound } from '../utils/alarmSounds'
 
+/** Converts absolute filesystem path to `file://` URL Chromium plays. */
+function toFileUrl(p: string): string {
+  const normalized = p.replace(/\\/g, '/')
+  const prefixed = normalized.match(/^[A-Za-z]:\//) ? `/${normalized}` : normalized
+  return `file://${encodeURI(prefixed)}`
+}
+
 const TICK_MS = 50
 
 // Volume travel rates, expressed as the time it takes to cross the full
@@ -56,6 +63,7 @@ class AlarmEngine {
   private audio: HTMLAudioElement | null = null
   private mode: Mode = 'idle'
   private loadedSound: AlarmSound | null = null
+  private loadedCustom: string | null = null
   private volume = 0
   private startedAt = 0
   private ticker: ReturnType<typeof setInterval> | null = null
@@ -81,7 +89,7 @@ class AlarmEngine {
    * else — the single element, the single ticker, stopping on recovery —
    * is identical, so the two modes cannot drift apart.
    */
-  startAlarm(sound: AlarmSound, volume: number, mode: AlarmMode = 'continuous'): void {
+  startAlarm(sound: AlarmSound, volume: number, mode: AlarmMode = 'continuous', customPath: string | null = null): void {
     this.clearAutoStop()
     this.volume = volume
 
@@ -94,7 +102,7 @@ class AlarmEngine {
     // outage, so the escalation starts over. A no-op re-entry is not.
     if (!resuming) this.startedAt = Date.now()
 
-    this.ensurePlaying(sound, true)
+    this.ensurePlaying(sound, true, customPath)
 
     if (mode === 'once') {
       this.autoStopTimer = setTimeout(() => {
@@ -107,13 +115,13 @@ class AlarmEngine {
   /** Applies live setting changes without interrupting playback: the
    *  ticker eases to the new volume, and a new sound swaps in at the
    *  volume already reached rather than restarting at silence. */
-  updateAlarm(sound: AlarmSound, volume: number): void {
+  updateAlarm(sound: AlarmSound, volume: number, customPath: string | null = null): void {
     if (this.mode !== 'alarm') return
     this.volume = volume
-    if (sound === this.loadedSound) return
+    if (sound === this.loadedSound && customPath === this.loadedCustom) return
 
     const wasPlaying = this.isPlaying()
-    this.loadSound(sound, true)
+    this.loadSound(sound, true, customPath)
     if (wasPlaying) this.play()
   }
 
@@ -129,7 +137,7 @@ class AlarmEngine {
    * it, and two sources fighting over one element is exactly what this
    * class exists to prevent.
    */
-  playTest(sound: AlarmSound, volume: number, durationMs: number): void {
+  playTest(sound: AlarmSound, volume: number, durationMs: number, customPath: string | null = null): void {
     if (this.mode === 'alarm') return
 
     this.clearAutoStop()
@@ -141,7 +149,7 @@ class AlarmEngine {
     // rather than resuming a half-faded tail. Looped, so the test lasts
     // its full duration instead of falling silent when the one-second
     // sample ends.
-    this.restart(sound, true)
+    this.restart(sound, true, customPath)
 
     this.autoStopTimer = setTimeout(() => {
       this.autoStopTimer = null
@@ -165,13 +173,13 @@ class AlarmEngine {
   /** Continues whatever is already sounding, or starts it from silence
    *  if nothing is. Never resets the volume of audio that is already
    *  playing — that would be an audible dip on a no-op re-entry. */
-  private ensurePlaying(sound: AlarmSound, loop: boolean): void {
+  private ensurePlaying(sound: AlarmSound, loop: boolean, customPath: string | null = null): void {
     const audio = this.element()
     audio.loop = loop
 
-    if (sound !== this.loadedSound) {
+    if (sound !== this.loadedSound || customPath !== this.loadedCustom) {
       const wasPlaying = this.isPlaying()
-      this.loadSound(sound, loop)
+      this.loadSound(sound, loop, customPath)
       if (wasPlaying) {
         this.play()
         this.startTicker()
@@ -180,15 +188,15 @@ class AlarmEngine {
     }
 
     if (audio.paused) {
-      this.restart(sound, loop)
+      this.restart(sound, loop, customPath)
       return
     }
     this.startTicker()
   }
 
-  private restart(sound: AlarmSound, loop: boolean): void {
+  private restart(sound: AlarmSound, loop: boolean, customPath: string | null = null): void {
     const audio = this.element()
-    if (sound !== this.loadedSound) this.loadSound(sound, loop)
+    if (sound !== this.loadedSound || customPath !== this.loadedCustom) this.loadSound(sound, loop, customPath)
     audio.loop = loop
     this.resetPosition()
     // Always from silence: the ticker ramps up from here, which is what
@@ -202,10 +210,11 @@ class AlarmEngine {
    *  element per the HTML media spec, so callers that were mid-playback
    *  resume with play() — the element's volume survives the swap, so
    *  that resume continues at the level already reached, without a jump. */
-  private loadSound(sound: AlarmSound, loop: boolean): void {
+  private loadSound(sound: AlarmSound, loop: boolean, customPath: string | null = null): void {
     const audio = this.element()
     this.loadedSound = sound
-    audio.src = ALARM_SOUND_SOURCES[sound]
+    this.loadedCustom = customPath
+    audio.src = customPath ? toFileUrl(customPath) : ALARM_SOUND_SOURCES[sound]
     audio.loop = loop
   }
 
@@ -240,6 +249,15 @@ class AlarmEngine {
       this.audio = new Audio()
       this.audio.preload = 'auto'
       this.audio.volume = 0
+      // Missing custom file falls back to built-in once, so broken path never silences alarm.
+      this.audio.onerror = () => {
+        if (this.loadedCustom && this.loadedSound) {
+          const fallback = this.loadedSound
+          this.loadedCustom = null
+          this.audio!.src = ALARM_SOUND_SOURCES[fallback]
+          this.play()
+        }
+      }
     }
     return this.audio
   }

@@ -13,6 +13,7 @@ interface UseAlarmOptions {
   volume: number
   sound: AlarmSound
   mode: AlarmMode
+  customPath?: string | null
 }
 
 /**
@@ -35,18 +36,18 @@ interface UseAlarmOptions {
  * reach. Restarting is both correct and the audible confirmation that
  * the new mode took.
  */
-export function useAlarm({ active, enabled, volume, sound, mode }: UseAlarmOptions): void {
+export function useAlarm({ active, enabled, volume, sound, mode, customPath }: UseAlarmOptions): void {
   const shouldPlay = active && enabled
 
   // Read by the start effect, which must not re-run when the settings
   // change (that is the second effect's job) but must still start with
   // current values rather than whatever they were when it last ran.
-  const latest = useRef({ sound, volume })
-  latest.current = { sound, volume }
+  const latest = useRef({ sound, volume, customPath: customPath ?? null })
+  latest.current = { sound, volume, customPath: customPath ?? null }
 
   useEffect(() => {
     if (!shouldPlay) return
-    alarmEngine.startAlarm(latest.current.sound, latest.current.volume, mode)
+    alarmEngine.startAlarm(latest.current.sound, latest.current.volume, mode, latest.current.customPath)
     return () => {
       alarmEngine.stopAlarm()
     }
@@ -54,6 +55,6 @@ export function useAlarm({ active, enabled, volume, sound, mode }: UseAlarmOptio
 
   useEffect(() => {
     if (!shouldPlay) return
-    alarmEngine.updateAlarm(sound, volume)
-  }, [shouldPlay, sound, volume])
+    alarmEngine.updateAlarm(sound, volume, customPath ?? null)
+  }, [shouldPlay, sound, volume, customPath])
 }
